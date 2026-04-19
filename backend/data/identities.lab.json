@@ -1,0 +1,94 @@
+{
+  "users": [
+    {
+    "phone_number": "+5521997775269",
+      "external_id": "user-maria-santos",
+      "display_name": "Maria Santos",
+      "role": "user",
+      "team": "financeiro",
+      "glpi_user_id": 7,
+      "active": true
+    },
+    {
+      "phone_number": "+5511977776666",
+      "external_id": "user-carlos-lima",
+      "display_name": "Carlos Lima",
+      "role": "user",
+      "team": "recepcao",
+      "glpi_user_id": 8,
+      "active": true
+    },
+    {
+      "phone_number": "+5511912345678",
+      "external_id": "tech-ana-souza",
+      "display_name": "Ana Souza",
+      "role": "technician",
+      "team": "infraestrutura",
+      "glpi_user_id": 4,
+      "active": true
+    },
+    {
+        "phone_number": "+5521972008679",
+      "external_id": "supervisor-paula-almeida",
+      "display_name": "Paula Almeida",
+      "role": "supervisor",
+      "team": "service-desk",
+      "glpi_user_id": 2,
+      "active": true
+    },
+    {
+      "phone_number": "+5511966665555",
+      "external_id": "user-bruno-costa",
+      "display_name": "Bruno Costa",
+      "role": "user",
+      "team": "operacoes",
+      "glpi_user_id": 9,
+      "active": true
+    },
+    {
+      "phone_number": "+5511944443333",
+      "external_id": "user-renata-melo",
+      "display_name": "Renata Melo",
+      "role": "user",
+      "team": "redes",
+      "glpi_user_id": 10,
+      "active": true
+    },
+    {
+      "phone_number": "+5511955554444",
+      "external_id": "user-luciana-prado",
+      "display_name": "Luciana Prado",
+      "role": "user",
+      "team": "financeiro",
+      "glpi_user_id": 11,
+      "active": true
+    },
+    {
+      "phone_number": "+5511933332222",
+      "external_id": "user-rafael-nunes",
+      "display_name": "Rafael Nunes",
+      "role": "user",
+      "team": "seguranca",
+      "glpi_user_id": 12,
+      "active": true
+    },
+    {
+      "phone_number": "+5511922221111",
+      "external_id": "user-patricia-gomes",
+      "display_name": "Patricia Gomes",
+      "role": "user",
+      "team": "administrativo",
+      "glpi_user_id": 13,
+      "active": true
+    },
+    {
+      "phone_number": "+5511910101010",
+      "external_id": "user-fabio-teixeira",
+      "display_name": "Fabio Teixeira",
+      "role": "user",
+      "team": "logistica",
+      "glpi_user_id": 14,
+      "active": true
+    }
+  ]
+}

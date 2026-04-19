@@ -1,0 +1,1 @@
+"""Conectores para sistemas externos."""

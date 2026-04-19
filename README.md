@@ -1,236 +1,186 @@
 # Script_Linux_Debian
-Zabbix, GLPI, Docker, Kubernetes, PHP8, Apache2 e MySql em um click
-#!/bin/bash
 
-# Script de instalação completa para servidor Debian 12
-# Recomendado executar como root
+Plataforma base para automação de infraestrutura, servicedesk e atendimento inteligente com integração entre GLPI, Zabbix, WhatsApp e agentes baseados em LangChain.
 
-# Cores para output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+## Visão do projeto
 
-# Função para log
-log() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
+Este repositório começou como um instalador rápido para Debian 12 com Apache, PHP, MariaDB, Docker, Kubernetes, Zabbix e GLPI. A evolução proposta agora é transformar essa base em uma plataforma de helpdesk e operações de infraestrutura com os seguintes objetivos:
 
-error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-    exit 1
-}
+- Provisionar rapidamente o ambiente base de observabilidade e ITSM.
+- Integrar WhatsApp como canal de atendimento para usuários e técnicos.
+- Permitir abertura, consulta e atualização de chamados via conversa.
+- Correlacionar alertas do Zabbix com incidentes no GLPI.
+- Usar agentes de IA para triagem, resumo, diagnóstico assistido e execução controlada de automações.
+- Implementar hierarquia operacional entre usuário final, técnico, supervisor e administradores.
 
-# Função para verificar se o MySQL/MariaDB está funcionando
-check_mysql() {
-    local max_attempts=5
-    local wait_time=10
-    
-    for ((i=1; i<=max_attempts; i++)); do
-        log "Verificando conexão MySQL... tentativa $i de $max_attempts"
-        if mysqladmin ping > /dev/null 2>&1; then
-            log "MySQL está respondendo!"
-            return 0
-        fi
-        sleep $wait_time
-    done
-    return 1
-}
+## Escopo atual
 
-# Verificar se está rodando como root
-if [ "$EUID" -ne 0 ]; then 
-    error "Por favor, execute como root"
-fi
+Hoje o projeto contém dois grandes blocos:
 
-# Atualização inicial do sistema
-log "Atualizando o sistema..."
-apt-get update && apt-get upgrade -y || error "Falha na atualização do sistema"
+- Provisionamento inicial do servidor Debian 12 com stack base de infraestrutura.
+- Documentação da arquitetura-alvo para a plataforma de servicedesk automatizada.
 
-# Instalação de pacotes essenciais
-log "Instalando pacotes essenciais..."
-apt-get install -y \
-    apt-transport-https \
-    ca-certificates \
-    curl \
-    gnupg \
-    lsb-release \
-    software-properties-common \
-    wget \
-    git \
-    net-tools \
-    vim \
-    htop \
-    iptables \
-    ufw \
-    fail2ban \
-    sudo || error "Falha na instalação dos pacotes essenciais"
+O instalador atual foi movido para um arquivo próprio:
 
-# Apache2
-log "Instalando Apache2..."
-apt-get install -y apache2 || error "Falha na instalação do Apache2"
+```bash
+bash install_debian12_full_stack.sh
+```
 
-# PHP 8.2 e extensões
-log "Instalando PHP e extensões..."
-apt-get install -y \
-    php8.2 \
-    php8.2-common \
-    php8.2-mysql \
-    php8.2-cli \
-    php8.2-common \
-    php8.2-curl \
-    php8.2-gd \
-    php8.2-intl \
-    php8.2-ldap \
-    php8.2-mbstring \
-    php8.2-xml \
-    php8.2-zip \
-    php8.2-opcache \
-    libapache2-mod-php8.2 || error "Falha na instalação do PHP"
+## Aplicações da solução
 
-# Habilitar módulo PHP no Apache
-a2enmod php8.2
+Este projeto não deve mais ser lido como um único instalador. A solução completa é composta por aplicações separadas, com implantação por camadas:
 
-# MySQL (MariaDB)
-log "Instalando MySQL (MariaDB)..."
-apt-get install -y mariadb-server mariadb-client || error "Falha na instalação do MySQL"
+- `install_debian12_full_stack.sh`: prepara o host base e instala GLPI e Zabbix em host dedicado.
+- `backend/`: aplicação separada em FastAPI para orquestrar WhatsApp, GLPI, Zabbix, identidade e regras operacionais.
+- WhatsApp Business API: integração externa para entrada e saída de mensagens.
+- IA do bot: `ollama` local como padrão, com opção de troca para `openai`, `groq`, `gemini` ou `claude`.
+- Camada de automação segura: Ansible, AWX ou Rundeck para execução homologada de playbooks.
+- Camada futura de IA e conhecimento: agentes, RAG, fila assíncrona e banco operacional próprio.
 
-# Iniciar MySQL e verificar status
-log "Iniciando serviço MySQL..."
-service mariadb start
+O detalhamento de quais aplicações existem, o que já está coberto no repositório e a ordem recomendada de implantação fica em [Aplicações e implantação](docs/aplicacoes-e-implantacao.md).
 
-# Verificar se o MySQL está rodando
-if ! check_mysql; then
-    error "Falha ao iniciar o MySQL. Verifique os logs em /var/log/mysql/"
-fi
+## Arquitetura proposta
 
-# Configurar senha root do MySQL
-MYSQL_ROOT_PASS=$(openssl rand -hex 12)
-log "Configurando senha root do MySQL..."
-mysqladmin -u root password "$MYSQL_ROOT_PASS"
+```mermaid
+flowchart LR
+    U[Usuário] --> W[WhatsApp Business API]
+    T[Técnico] --> W
+    W --> O[Orquestrador de Atendimento]
+    O --> G[GLPI]
+    O --> Z[Zabbix]
+    O --> K[Base de Conhecimento / RAG]
+    O --> A[Agentes LangChain ou LangGraph]
+    A --> P[Playbooks aprovados / Ansible / AWX / Rundeck]
+    P --> I[Infraestrutura e Serviços]
+    Z --> O
+    G --> N[Notificações e Escalonamento]
+    N --> T
+```
 
-# Docker
-log "Instalando Docker..."
-apt-get remove -y docker docker-engine docker.io containerd runc || true
-curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io || error "Falha na instalação do Docker"
+## Fluxos principais
 
-# Docker Compose
-log "Instalando Docker Compose..."
-curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-chmod +x /usr/local/bin/docker-compose
+1. Usuário abre chamado pelo WhatsApp.
+2. O orquestrador identifica o usuário, valida permissões e coleta contexto mínimo.
+3. O chamado é criado no GLPI com categoria, impacto, urgência e dados adicionais.
+4. Se houver alerta relacionado no Zabbix, o incidente é enriquecido com host, trigger, severidade e histórico.
+5. O técnico recebe notificação com resumo, classificação inicial e sugestão de runbook.
+6. O técnico pode consultar agentes para diagnóstico, resumo do histórico, próximos passos e automações permitidas.
+7. A execução operacional acontece apenas por ferramentas autorizadas, com trilha de auditoria e política de aprovação.
 
-# Kubernetes
-log "Instalando Kubernetes..."
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
-apt-get update
-apt-get install -y kubelet kubeadm kubectl || error "Falha na instalação do Kubernetes"
+## Perfis e hierarquia
 
-# Zabbix
-log "Instalando Zabbix..."
-wget https://repo.zabbix.com/zabbix/6.4/debian/pool/main/z/zabbix-release/zabbix-release_6.4-1+debian12_all.deb
-dpkg -i zabbix-release_6.4-1+debian12_all.deb
-apt-get update
-apt-get install -y \
-    zabbix-server-mysql \
-    zabbix-frontend-php \
-    zabbix-apache-conf \
-    zabbix-sql-scripts \
-    zabbix-agent || error "Falha na instalação do Zabbix"
+- Usuário final: abre chamado, consulta status, envia evidências e recebe atualizações.
+- Técnico N1: recebe chamados, executa diagnósticos de baixo risco e usa agentes para triagem.
+- Técnico N2 ou N3: atua em incidentes complexos, acessa automações avançadas e aprova mudanças técnicas.
+- Supervisor: acompanha fila, define prioridades, aprova ações sensíveis e revisa indicadores.
+- Administrador: mantém credenciais, integrações, catálogos de serviço, políticas e observabilidade.
 
-# Configurar bancos de dados
-log "Configurando banco de dados do Zabbix..."
-ZABBIX_DB_PASS=$(openssl rand -hex 12)
-mysql -uroot -p"$MYSQL_ROOT_PASS" -e "
-CREATE DATABASE zabbix character set utf8mb4 collate utf8mb4_bin;
-CREATE USER 'zabbix'@'localhost' IDENTIFIED BY '$ZABBIX_DB_PASS';
-GRANT ALL PRIVILEGES ON zabbix.* TO 'zabbix'@'localhost';
-FLUSH PRIVILEGES;"
+## Automações prioritárias
 
-# Importar schema inicial do Zabbix
-zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql -uzabbix -p"$ZABBIX_DB_PASS" zabbix
+- Abertura de chamado por texto, áudio ou imagem enviada no WhatsApp.
+- Consulta de status de chamado sem necessidade de acessar portal web.
+- Correlação automática entre incidente do GLPI e evento do Zabbix.
+- Enriquecimento do ticket com hostname, IP, serviço afetado, últimas alterações e runbook sugerido.
+- Notificação proativa para técnicos e supervisores em incidentes críticos.
+- Execução assistida de playbooks aprovados, como teste de conectividade, coleta de logs e reinício controlado de serviços.
+- Geração automática de resumo técnico e fechamento padronizado do atendimento.
 
-# GLPI
-log "Instalando GLPI..."
-GLPI_VERSION="10.0.10"
-wget https://github.com/glpi-project/glpi/releases/download/$GLPI_VERSION/glpi-$GLPI_VERSION.tgz
-tar xzf glpi-$GLPI_VERSION.tgz -C /var/www/html/
-chown -R www-data:www-data /var/www/html/glpi
-chmod -R 755 /var/www/html/glpi
+## Guardrails obrigatórios
 
-log "Configurando banco de dados do GLPI..."
-GLPI_DB_PASS=$(openssl rand -hex 12)
-mysql -uroot -p"$MYSQL_ROOT_PASS" -e "
-CREATE DATABASE glpi CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'glpi'@'localhost' IDENTIFIED BY '$GLPI_DB_PASS';
-GRANT ALL PRIVILEGES ON glpi.* TO 'glpi'@'localhost';
-FLUSH PRIVILEGES;"
+- Não permitir que o modelo execute shell livre ou comandos arbitrários.
+- Toda automação deve sair de uma allowlist de ferramentas e playbooks.
+- Segredos devem ficar em cofre dedicado, nunca em prompt ou texto aberto.
+- Toda ação técnica precisa gerar auditoria, usuário responsável, horário e resultado.
+- Ações destrutivas ou com impacto operacional exigem aprovação explícita.
+- O canal de WhatsApp deve usar API oficial ou fornecedor homologado para produção.
 
-# Configurações de rede
-log "Configurando rede..."
-# Configurar UFW
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 10050/tcp # Zabbix Agent
-ufw allow 10051/tcp # Zabbix Server
-ufw --force enable
+## Estrutura atual do repositório
 
-# Configurar Fail2ban
-cat > /etc/fail2ban/jail.local <<EOF
-[DEFAULT]
-bantime = 3600
-findtime = 600
-maxretry = 5
+```text
+.
+├── README.md
+├── backend/
+│   ├── README.md
+│   ├── app/
+│   ├── tests/
+│   └── pyproject.toml
+├── docs/
+│   ├── arquitetura-helpdesk.md
+│   ├── automacoes-sugeridas.md
+│   └── roadmap.md
+├── infra/
+│   ├── README.md
+│   ├── automation-runner/
+│   ├── backend/
+│   ├── glpi/
+│   ├── helpdesk-lab/
+│   ├── observability/
+│   └── zabbix/
+├── install_debian12_full_stack.sh
+```
 
-[sshd]
-enabled = true
-port = ssh
-logpath = %(sshd_log)s
-backend = %(sshd_backend)s
-EOF
+## Documentação complementar
 
-# Iniciar serviços
-log "Iniciando serviços..."
-for service in apache2 mariadb zabbix-server zabbix-agent docker; do
-    log "Iniciando $service..."
-    service $service start || log "Aviso: Falha ao iniciar $service"
-done
+- [Arquitetura detalhada](docs/arquitetura-helpdesk.md)
+- [Aplicações e estratégia de implantação](docs/aplicacoes-e-implantacao.md)
+- [Guia passo a passo para implantação em empresa](docs/implantacao-empresa.md)
+- [Guia para empresa com GLPI e Zabbix ja existentes](docs/implantacao-ambiente-existente.md)
+- [Checklist executivo de go-live](docs/checklist-go-live.md)
+- [Catálogo inicial de automações e agentes](docs/automacoes-sugeridas.md)
+- [Portas e conectividade](docs/portas-e-conectividade.md)
+- [Roadmap de implantação](docs/roadmap.md)
+- [Guia do backend MVP](backend/README.md)
+- [Laboratório isolado GLPI e Zabbix](infra/helpdesk-lab/README.md)
 
-# Limpeza
-log "Realizando limpeza..."
-apt-get autoremove -y
-apt-get clean
+## Direção técnica recomendada
 
-# Salvar senhas em arquivo seguro
-log "Salvando credenciais..."
-cat > /root/credentials.txt <<EOF
-MySQL root password: $MYSQL_ROOT_PASS
-Zabbix Database Password: $ZABBIX_DB_PASS
-GLPI Database Password: $GLPI_DB_PASS
-EOF
-chmod 600 /root/credentials.txt
+- GLPI como sistema oficial de chamados, filas, SLA e base de ativos.
+- Zabbix como origem de eventos operacionais e monitoração.
+- Um backend de orquestração como núcleo de integração entre canais, agentes e ferramentas.
+- LangGraph como alternativa preferível se o fluxo exigir estado, aprovações e handoff entre agentes.
+- Ansible, AWX ou Rundeck como camada de execução segura para automações.
+- Banco operacional separado para o backend da plataforma, evitando acoplamento indevido com a base do GLPI.
 
-# Configurar zabbix_server.conf
-log "Configurando Zabbix Server..."
-sed -i "s/# DBPassword=/DBPassword=$ZABBIX_DB_PASS/" /etc/zabbix/zabbix_server.conf
+## Atenção às portas
 
-log "Instalação concluída!"
-echo "-------------------------------------------"
-echo "Informações importantes:"
-echo "1. As senhas dos bancos de dados foram salvas em /root/credentials.txt"
-echo "2. Configure o Zabbix em: http://seu_servidor/zabbix"
-echo "3. Configure o GLPI em: http://seu_servidor/glpi"
-echo "4. Execute 'kubeadm init' para iniciar o cluster Kubernetes"
-echo "5. Verifique os logs em /var/log/ para possíveis erros"
-echo "-------------------------------------------"
+- Este projeto não deve presumir que `80`, `443`, `3306`, `10050` e `10051` estejam livres no host.
+- O backend local foi movido para a faixa `18001-18010`, com seleção automática de porta livre.
+- O instalador de stack completa agora deve ser tratado como exclusivo para host dedicado ou revisado antes de uso em host com Docker.
 
-log "Verificando status dos serviços..."
-for service in apache2 mariadb zabbix-server zabbix-agent docker; do
-    service $service status || log "Aviso: $service pode não estar rodando"
-done
+## Hierarquia operacional no MVP
 
-log "Script finalizado! Verifique os logs para garantir que tudo foi instalado corretamente."
+- O backend já consegue resolver o papel do remetente a partir do número de telefone usando o diretório local de identidades.
+- A base inicial fica em [backend/data/identities.json](/home/ricardo/Script_Linux_Debian/backend/data/identities.json).
+- Isso permite distinguir usuário final, técnico, supervisor e admin nos fluxos do WhatsApp antes de integrar uma base corporativa real.
+- Técnicos, supervisores e admins já podem usar comandos operacionais via WhatsApp com prefixo `/`, sem misturar esse fluxo com abertura de chamado.
+- O mesmo diretório local também pode mapear `glpi_user_id` para vincular o solicitante real durante a criação do ticket no GLPI.
+
+## Próximos passos sugeridos
+
+1. Estruturar o backend de integração entre WhatsApp, GLPI e Zabbix.
+2. Definir o modelo de autenticação e vínculo entre número de telefone, usuário e perfil técnico.
+3. Criar o primeiro fluxo MVP: abrir chamado pelo WhatsApp e notificar o técnico.
+4. Adicionar correlação com alertas do Zabbix.
+5. Introduzir agentes apenas para triagem e resumo antes de liberar execução operacional.
+
+## Laboratório pronto para integração
+
+Com o stack do laboratorio ativo em `infra/helpdesk-lab`, o fluxo de integracao e seed fica:
+
+```bash
+cd /home/ricardo/Script_Linux_Debian/infra/helpdesk-lab
+./scripts/seed-test-data.sh
+```
+
+Depois:
+
+```bash
+cd /home/ricardo/Script_Linux_Debian/backend
+./run_dev.sh
+```
+
+Isso deixa o backend apontando para:
+
+- GLPI: `http://127.0.0.1:8088/apirest.php`
+- Zabbix: `http://127.0.0.1:8089/api_jsonrpc.php`
+- identidades de laboratorio: `backend/data/identities.lab.json`

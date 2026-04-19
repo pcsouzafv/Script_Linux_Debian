@@ -1,0 +1,117 @@
+name: helpdesk_lab
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_bin
+      - --log-bin-trust-function-creators=1
+    env_file:
+      - .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${LAB_DB_ROOT_PASSWORD}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot --password=$$MYSQL_ROOT_PASSWORD
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    expose:
+      - "3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./runtime/initdb:/docker-entrypoint-initdb.d:ro
+    networks:
+      - helpdesk_lab
+
+  glpi:
+    profiles:
+      - glpi
+      - full
+      - all
+    image: glpi/glpi:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      GLPI_DB_HOST: db
+      GLPI_DB_PORT: 3306
+      GLPI_DB_NAME: ${GLPI_DB_NAME}
+      GLPI_DB_USER: ${GLPI_DB_USER}
+      GLPI_DB_PASSWORD: ${GLPI_DB_PASSWORD}
+      GLPI_SKIP_AUTOUPDATE: ${GLPI_SKIP_AUTOUPDATE}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:${GLPI_HOST_PORT}:80
+    volumes:
+      - glpi_data:/var/glpi
+    networks:
+      - helpdesk_lab
+
+  zabbix-server:
+    profiles:
+      - zabbix
+      - full
+      - all
+    image: zabbix/zabbix-server-mysql:alpine-7.4-latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_SERVER_HOST: db
+      DB_SERVER_PORT: 3306
+      MYSQL_DATABASE: ${ZABBIX_DB_NAME}
+      MYSQL_USER: ${ZABBIX_DB_USER}
+      MYSQL_PASSWORD: ${ZABBIX_DB_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "10051"
+    networks:
+      - helpdesk_lab
+
+  zabbix-web:
+    profiles:
+      - zabbix
+      - full
+      - all
+    image: zabbix/zabbix-web-apache-mysql:alpine-7.4-latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_SERVER_HOST: db
+      DB_SERVER_PORT: 3306
+      MYSQL_DATABASE: ${ZABBIX_DB_NAME}
+      MYSQL_USER: ${ZABBIX_DB_USER}
+      MYSQL_PASSWORD: ${ZABBIX_DB_PASSWORD}
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_SERVER_PORT: 10051
+      ZBX_SERVER_NAME: ${ZABBIX_SERVER_NAME}
+      PHP_TZ: ${LAB_TIMEZONE}
+    depends_on:
+      db:
+        condition: service_healthy
+      zabbix-server:
+        condition: service_started
+    ports:
+      - 127.0.0.1:${ZABBIX_WEB_HOST_PORT}:8080
+    networks:
+      - helpdesk_lab
+
+networks:
+  helpdesk_lab:
+    name: helpdesk_lab
+
+volumes:
+  db_data:
+    name: helpdesk_lab_db_data
+  glpi_data:
+    name: helpdesk_lab_glpi_data
