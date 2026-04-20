@@ -54,6 +54,8 @@ pip install -e .[dev]
 
 O arquivo [backend/.env](/home/ricardo/Script_Linux_Debian/backend/.env) já foi criado com todas as chaves de credenciais esperadas. Enquanto os valores continuarem como placeholder, o backend trata essas integrações como não configuradas e permanece em modo mock. Quando quiser ativar chamadas externas, voce pode usar tanto tokens quanto usuario e senha, dependendo da integracao.
 
+As rotas internas sob `/api/v1/helpdesk/*` e o endpoint bruto `/api/v1/webhooks/whatsapp/messages` exigem um token de acesso enviado em `X-Helpdesk-API-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_API_ACCESS_TOKEN` antes de consumir ou publicar essas rotas.
+
 Modos aceitos no backend:
 
 - GLPI: `user_token` ou `username/password`
@@ -95,6 +97,7 @@ Variáveis principais:
 - `HELPDESK_LLM_MODEL`
 - `HELPDESK_LLM_REQUEST_TIMEOUT`
 - `HELPDESK_LLM_TEMPERATURE`
+- `HELPDESK_API_ACCESS_TOKEN`
 
 Credenciais opcionais por provider:
 
@@ -115,13 +118,15 @@ HELPDESK_LLM_MODEL=llama3.1
 O endpoint de status da IA não executa prompt real; ele mostra apenas o estado da configuração ativa:
 
 ```bash
-curl http://127.0.0.1:18001/api/v1/helpdesk/ai/status
+curl http://127.0.0.1:18001/api/v1/helpdesk/ai/status \
+  -H "X-Helpdesk-API-Key: $HELPDESK_API_ACCESS_TOKEN"
 ```
 
 Para validar geração real com o provider configurado:
 
 ```bash
 curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/ai/generate \
+  -H "X-Helpdesk-API-Key: $HELPDESK_API_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Responda em uma frase: qual é o objetivo deste backend?",
@@ -192,6 +197,14 @@ As portas são controladas por `HELPDESK_API_HOST`, `HELPDESK_API_PORT`, `HELPDE
 
 Para o webhook oficial da Meta, mantenha o backend escutando em `127.0.0.1` e publique externamente apenas via reverse proxy ou túnel controlado.
 
+Para os webhooks oficiais, trate estes campos como obrigatórios:
+
+- `HELPDESK_WHATSAPP_VERIFY_TOKEN`
+- `HELPDESK_WHATSAPP_APP_SECRET`
+- `HELPDESK_EVOLUTION_WEBHOOK_SECRET`
+
+Sem esses valores, os endpoints oficiais respondem como não configurados.
+
 Para verificar a porta escolhida sem subir a API:
 
 ```bash
@@ -211,7 +224,7 @@ Para verificar a porta escolhida sem subir a API:
 - `GET /api/v1/webhooks/whatsapp/verify`
 - `POST /api/v1/webhooks/whatsapp/meta`
 - `POST /api/v1/webhooks/whatsapp/evolution`
-- `POST /api/v1/webhooks/whatsapp/messages`
+- `POST /api/v1/webhooks/whatsapp/messages` (uso interno, protegido por token)
 
 ## Bootstrap do laboratorio
 
@@ -249,6 +262,7 @@ cd /home/ricardo/Script_Linux_Debian/backend
 
 ```bash
 curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/tickets/open \
+  -H "X-Helpdesk-API-Key: $HELPDESK_API_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "subject": "Usuário sem acesso ao ERP",
@@ -270,6 +284,7 @@ curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/tickets/open \
 
 ```bash
 curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/triage \
+  -H "X-Helpdesk-API-Key: $HELPDESK_API_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "subject": "Usuarios sem acesso ao ERP",
@@ -290,6 +305,7 @@ Esse endpoint nao executa nenhuma acao operacional. Ele apenas devolve uma triag
 
 ```bash
 curl -X POST http://127.0.0.1:18001/api/v1/webhooks/whatsapp/messages \
+  -H "X-Helpdesk-API-Key: $HELPDESK_API_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "sender_phone": "+5511999999999",

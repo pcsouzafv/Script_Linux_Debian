@@ -10,6 +10,8 @@ from app.services.glpi import MOCK_TICKET_STORE
 
 
 client = TestClient(app)
+API_HEADERS = {"X-Helpdesk-API-Key": "test-api-token"}
+client.headers.update(API_HEADERS)
 
 
 def test_healthcheck_returns_ok() -> None:
@@ -17,6 +19,21 @@ def test_healthcheck_returns_ok() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_protected_route_rejects_missing_api_token() -> None:
+    unauthenticated_client = TestClient(app)
+
+    response = unauthenticated_client.post(
+        "/api/v1/helpdesk/triage",
+        json={
+            "subject": "Teste sem token",
+            "description": "Validando bloqueio de autenticação nas rotas internas.",
+        },
+    )
+
+    assert response.status_code == 401
+    assert "credenciais" in response.json()["detail"].lower()
 
 
 def test_open_ticket_works_in_mock_mode() -> None:
@@ -41,9 +58,34 @@ def test_open_ticket_works_in_mock_mode() -> None:
     body = response.json()
     assert body["ticket_id"].startswith("GLPI-LOCAL-")
     assert body["integration_mode"] in {"mock", "mixed"}
-    assert body["requester_glpi_user_id"] is None
+    assert body["requester_glpi_user_id"] == 101
+    assert body["identity_source"] == "directory"
     assert body["triage"]["resolved_category"] == "acesso"
     assert body["triage"]["suggested_queue"] == "ServiceDesk-Acessos"
+
+
+def test_open_ticket_ignores_sensitive_requester_fields_from_client_payload() -> None:
+    payload = {
+        "subject": "Tentativa de injetar solicitante operacional",
+        "description": "A rota protegida não deve confiar em papel ou glpi_user_id enviados pelo cliente.",
+        "requester": {
+            "external_id": "spoofed-user",
+            "display_name": "Solicitante Forjado",
+            "phone_number": "+5511900099999",
+            "role": "admin",
+            "team": "seguranca",
+            "glpi_user_id": 999,
+        },
+    }
+
+    response = client.post("/api/v1/helpdesk/tickets/open", json=payload)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["requester_role"] == "user"
+    assert body["requester_team"] is None
+    assert body["requester_glpi_user_id"] is None
+    assert body["identity_source"] == "direct"
 
 
 def test_get_ticket_returns_local_mock_ticket() -> None:
@@ -197,6 +239,20 @@ def test_whatsapp_message_uses_identity_directory_role() -> None:
     assert body["identity_source"] == "directory"
     assert body["assistant_result"]["flow_name"] == "technician_operations"
     assert "Não abri chamado automaticamente" in body["assistant_result"]["reply_text"]
+
+
+def test_raw_whatsapp_messages_endpoint_requires_api_token() -> None:
+    unauthenticated_client = TestClient(app)
+
+    response = unauthenticated_client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5521997775269",
+            "text": "Teste sem token",
+        },
+    )
+
+    assert response.status_code == 401
 
 
 def test_user_whatsapp_message_opens_ticket_by_default() -> None:

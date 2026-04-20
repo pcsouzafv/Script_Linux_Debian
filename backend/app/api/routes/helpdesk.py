@@ -9,6 +9,7 @@ from app.core.dependencies import (
     get_llm_client,
     get_whatsapp_client,
 )
+from app.core.security import require_api_access
 from app.orchestration.helpdesk import HelpdeskOrchestrator
 from app.schemas.helpdesk import (
     CorrelationRequest,
@@ -30,11 +31,13 @@ from app.services.llm import LLMClient
 from app.services.whatsapp import WhatsAppClient
 
 router = APIRouter(tags=["helpdesk"])
+protected_dependencies = [Depends(require_api_access)]
 
 
 @router.post(
     "/helpdesk/triage",
     response_model=TicketTriageResponse,
+    dependencies=protected_dependencies,
 )
 async def triage_ticket(
     payload: TicketTriageRequest,
@@ -47,6 +50,7 @@ async def triage_ticket(
     "/helpdesk/tickets/open",
     response_model=TicketOpenResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=protected_dependencies,
 )
 async def open_ticket(
     payload: TicketOpenRequest,
@@ -58,6 +62,7 @@ async def open_ticket(
 @router.get(
     "/helpdesk/tickets/{ticket_id}",
     response_model=TicketDetailsResponse,
+    dependencies=protected_dependencies,
 )
 async def get_ticket(
     ticket_id: str,
@@ -69,6 +74,7 @@ async def get_ticket(
 @router.get(
     "/helpdesk/identities/{phone_number}",
     response_model=IdentityLookupResponse,
+    dependencies=protected_dependencies,
 )
 async def get_identity(
     phone_number: str,
@@ -80,6 +86,7 @@ async def get_identity(
 @router.post(
     "/helpdesk/incidents/correlate",
     response_model=CorrelationResponse,
+    dependencies=protected_dependencies,
 )
 async def correlate_incident(
     payload: CorrelationRequest,
@@ -91,6 +98,7 @@ async def correlate_incident(
 @router.get(
     "/helpdesk/ai/status",
     response_model=LLMStatusResponse,
+    dependencies=protected_dependencies,
 )
 async def get_llm_status(
     llm_client: LLMClient = Depends(get_llm_client),
@@ -109,6 +117,7 @@ async def get_llm_status(
 @router.post(
     "/helpdesk/ai/generate",
     response_model=LLMGenerateResponse,
+    dependencies=protected_dependencies,
 )
 async def generate_with_llm(
     payload: LLMGenerateRequest,
@@ -136,6 +145,12 @@ async def verify_whatsapp_webhook(
     verify_token: str = Query(..., alias="hub.verify_token"),
     settings: Settings = Depends(get_settings),
 ) -> PlainTextResponse:
+    if not settings.whatsapp_verify_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Token de verificação do webhook do WhatsApp não configurado.",
+        )
+
     if mode != "subscribe" or verify_token != settings.whatsapp_verify_token:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -152,9 +167,16 @@ async def verify_whatsapp_webhook(
 async def receive_meta_whatsapp_webhook(
     request: Request,
     signature: str | None = Header(default=None, alias="X-Hub-Signature-256"),
+    settings: Settings = Depends(get_settings),
     whatsapp_client: WhatsAppClient = Depends(get_whatsapp_client),
     orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
 ) -> WhatsAppWebhookProcessingResponse:
+    if settings.whatsapp_validate_signature and not settings.whatsapp_app_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook da Meta não está completamente configurado.",
+        )
+
     raw_body = await request.body()
     if not whatsapp_client.validate_webhook_signature(raw_body, signature):
         raise HTTPException(
@@ -182,9 +204,16 @@ async def receive_meta_whatsapp_webhook(
 async def receive_evolution_whatsapp_webhook(
     request: Request,
     secret: str | None = Header(default=None, alias="X-Evolution-Webhook-Secret"),
+    settings: Settings = Depends(get_settings),
     whatsapp_client: WhatsAppClient = Depends(get_whatsapp_client),
     orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
 ) -> WhatsAppWebhookProcessingResponse:
+    if not settings.evolution_webhook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook da Evolution API não está configurado com segredo dedicado.",
+        )
+
     raw_body = await request.body()
     if not whatsapp_client.validate_evolution_webhook_secret(secret):
         raise HTTPException(
@@ -214,6 +243,8 @@ async def receive_evolution_whatsapp_webhook(
     "/webhooks/whatsapp/messages",
     response_model=WhatsAppInteractionResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=protected_dependencies,
+    include_in_schema=False,
 )
 async def receive_whatsapp_message(
     payload: NormalizedWhatsAppMessage,

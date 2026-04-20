@@ -7,6 +7,7 @@ from app.main import app
 
 
 client = TestClient(app)
+client.headers.update({"X-Helpdesk-API-Key": "test-api-token"})
 
 
 @dataclass

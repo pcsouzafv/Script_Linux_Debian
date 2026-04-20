@@ -8,6 +8,7 @@ from app.services.intake import clear_user_intake_sessions
 def isolate_test_settings() -> None:
     settings = get_settings()
     original_values = {
+        "api_access_token": settings.api_access_token,
         "identity_provider": settings.identity_provider,
         "identity_store_path": settings.identity_store_path,
         "glpi_base_url": settings.glpi_base_url,
@@ -19,6 +20,8 @@ def isolate_test_settings() -> None:
         "zabbix_api_token": settings.zabbix_api_token,
         "zabbix_username": settings.zabbix_username,
         "zabbix_password": settings.zabbix_password,
+        "whatsapp_verify_token": settings.whatsapp_verify_token,
+        "whatsapp_validate_signature": settings.whatsapp_validate_signature,
         "whatsapp_delivery_provider": settings.whatsapp_delivery_provider,
         "whatsapp_access_token": settings.whatsapp_access_token,
         "whatsapp_phone_number_id": settings.whatsapp_phone_number_id,
@@ -34,6 +37,7 @@ def isolate_test_settings() -> None:
         "llm_model": settings.llm_model,
     }
 
+    settings.api_access_token = "test-api-token"
     settings.identity_provider = "mock-file"
     settings.identity_store_path = "data/identities.json"
     settings.glpi_base_url = None
@@ -45,6 +49,8 @@ def isolate_test_settings() -> None:
     settings.zabbix_api_token = None
     settings.zabbix_username = None
     settings.zabbix_password = None
+    settings.whatsapp_verify_token = "test-whatsapp-verify-token"
+    settings.whatsapp_validate_signature = False
     settings.whatsapp_delivery_provider = "mock"
     settings.whatsapp_access_token = None
     settings.whatsapp_phone_number_id = None

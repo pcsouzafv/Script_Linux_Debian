@@ -5,6 +5,7 @@ from app.main import app
 
 
 client = TestClient(app)
+client.headers.update({"X-Helpdesk-API-Key": "test-api-token"})
 
 
 def test_llm_provider_aliases_are_normalized() -> None:

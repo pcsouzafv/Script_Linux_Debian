@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     api_port: int = 18001
     api_port_max: int = 18010
     api_port_strict: bool = False
+    api_access_token: str | None = None
     identity_provider: str = "glpi"
     identity_store_path: str = "data/identities.json"
     identity_glpi_user_profiles: list[str] = ["Self-Service"]
@@ -31,8 +32,8 @@ class Settings(BaseSettings):
     zabbix_username: str | None = None
     zabbix_password: str | None = None
 
-    whatsapp_verify_token: str = "local-verify-token"
-    whatsapp_validate_signature: bool = False
+    whatsapp_verify_token: str | None = None
+    whatsapp_validate_signature: bool = True
     whatsapp_delivery_provider: str = "auto"
     whatsapp_access_token: str | None = None
     whatsapp_phone_number_id: str | None = None
@@ -64,6 +65,7 @@ class Settings(BaseSettings):
     )
 
     @field_validator(
+        "api_access_token",
         "glpi_base_url",
         "glpi_app_token",
         "glpi_user_token",
@@ -73,6 +75,7 @@ class Settings(BaseSettings):
         "zabbix_api_token",
         "zabbix_username",
         "zabbix_password",
+        "whatsapp_verify_token",
         "whatsapp_access_token",
         "whatsapp_phone_number_id",
         "whatsapp_public_number",

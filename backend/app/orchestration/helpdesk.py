@@ -81,19 +81,29 @@ class HelpdeskOrchestrator:
         return await self.triage_agent.triage(payload)
 
     async def open_ticket(self, request: TicketOpenRequest) -> TicketOpenResponse:
+        resolved_requester = await self.identity_service.resolve_protected_api_requester(
+            request.requester
+        )
+        validated_request = request.model_copy(
+            update={
+                "requester": resolved_requester.requester,
+            }
+        )
         triage = await self.triage_ticket(
             TicketTriageRequest(
-                subject=request.subject,
-                description=request.description,
-                current_category=request.category,
+                subject=validated_request.subject,
+                description=validated_request.description,
+                current_category=validated_request.category,
                 current_priority=(
-                    request.priority if "priority" in request.model_fields_set else None
+                    validated_request.priority
+                    if "priority" in request.model_fields_set
+                    else None
                 ),
-                asset_name=request.asset_name,
-                service_name=request.service_name,
+                asset_name=validated_request.asset_name,
+                service_name=validated_request.service_name,
             )
         )
-        effective_request = request.model_copy(
+        effective_request = validated_request.model_copy(
             update={
                 "category": triage.resolved_category,
                 "priority": triage.resolved_priority,
@@ -107,6 +117,7 @@ class HelpdeskOrchestrator:
         ticket_result = await self.glpi_client.create_ticket(effective_request)
 
         notes = [
+            *resolved_requester.notes,
             *triage.notes,
             *correlation_notes,
             *ticket_result.notes,
@@ -120,12 +131,12 @@ class HelpdeskOrchestrator:
             status=ticket_result.status,
             routed_to=triage.suggested_queue,
             integration_mode=self._merge_modes(ticket_result.mode, correlation_mode),
-            requester_role=request.requester.role,
-            requester_external_id=request.requester.external_id,
-            requester_display_name=request.requester.display_name,
-            requester_team=request.requester.team,
-            requester_glpi_user_id=request.requester.glpi_user_id,
-            identity_source="direct",
+            requester_role=effective_request.requester.role,
+            requester_external_id=effective_request.requester.external_id,
+            requester_display_name=effective_request.requester.display_name,
+            requester_team=effective_request.requester.team,
+            requester_glpi_user_id=effective_request.requester.glpi_user_id,
+            identity_source=resolved_requester.source,
             triage=triage,
             correlation=correlation,
             notes=notes,

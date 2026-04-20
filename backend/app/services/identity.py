@@ -138,6 +138,89 @@ class IdentityService:
             f"Nenhuma identidade registrada para o glpi_user_id {glpi_user_id}."
         )
 
+    async def resolve_protected_api_requester(
+        self,
+        requester: RequesterIdentity,
+    ) -> ResolvedIdentity:
+        if self.settings.identity_provider == "glpi":
+            if requester.phone_number:
+                resolved = await self._resolve_requester_from_glpi(requester.phone_number)
+            elif requester.glpi_user_id:
+                resolved = await self.get_requester_by_glpi_user_id(requester.glpi_user_id)
+            else:
+                identity = await self.get_registered_identity_by_identifier(requester.external_id)
+                resolved = ResolvedIdentity(
+                    requester=RequesterIdentity(
+                        external_id=identity.external_id,
+                        display_name=identity.display_name,
+                        phone_number=identity.phone_number,
+                        role=identity.role,
+                        team=identity.team,
+                        glpi_user_id=identity.glpi_user_id,
+                    ),
+                    source=identity.source,
+                    notes=identity.notes,
+                )
+
+            resolved.notes.append(
+                "Identidade do solicitante validada no servidor para a rota protegida."
+            )
+            return resolved
+
+        if requester.phone_number:
+            try:
+                identity = await self.get_registered_identity(requester.phone_number)
+                return self._build_resolved_identity_from_lookup(
+                    identity,
+                    note="Identidade do solicitante validada no diretório local para a rota protegida.",
+                )
+            except ResourceNotFoundError:
+                pass
+
+        try:
+            identity = await self.get_registered_identity_by_identifier(requester.external_id)
+            return self._build_resolved_identity_from_lookup(
+                identity,
+                note="Identidade do solicitante validada no diretório local para a rota protegida.",
+            )
+        except ResourceNotFoundError:
+            pass
+
+        sanitized_requester = RequesterIdentity(
+            external_id=requester.external_id,
+            display_name=requester.display_name,
+            phone_number=requester.phone_number,
+            role=UserRole.USER,
+            team=None,
+            glpi_user_id=None,
+        )
+        return ResolvedIdentity(
+            requester=sanitized_requester,
+            source="direct",
+            notes=[
+                "Rota protegida em modo mock: papel, time e glpi_user_id enviados pelo cliente foram ignorados."
+            ],
+        )
+
+    def _build_resolved_identity_from_lookup(
+        self,
+        identity: IdentityLookupResponse,
+        *,
+        note: str,
+    ) -> ResolvedIdentity:
+        return ResolvedIdentity(
+            requester=RequesterIdentity(
+                external_id=identity.external_id,
+                display_name=identity.display_name,
+                phone_number=identity.phone_number,
+                role=identity.role,
+                team=identity.team,
+                glpi_user_id=identity.glpi_user_id,
+            ),
+            source=identity.source,
+            notes=[*identity.notes, note],
+        )
+
     def _resolve_requester_from_mock(
         self,
         phone_number: str,
