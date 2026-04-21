@@ -65,6 +65,8 @@ O sistema classifica melhor os tickets e entrega contexto útil para o atendimen
 
 ## Fase 4: Automação assistida
 
+Status atual: concluida no escopo atual do repositorio.
+
 Objetivo:
 Executar apenas tarefas controladas de baixo risco com aprovação quando necessário.
 
@@ -78,7 +80,15 @@ Entregas:
 Critério de saída:
 Técnicos conseguem disparar automações seguras a partir do contexto do ticket.
 
+Situação observada hoje:
+
+- catálogo homologado inicial implementado;
+- worker seguro com fila, aprovação, retry e dead-letter implementado;
+- execução homologada por Ansible Runner validada no laboratório.
+
 ## Fase 5: Operação avançada
+
+Status atual: parcial.
 
 Objetivo:
 Expandir para correlação avançada, métricas operacionais e melhoria contínua.
@@ -92,6 +102,11 @@ Entregas:
 
 Critério de saída:
 Plataforma operando como camada de apoio real para service desk e infraestrutura.
+
+Situação observada hoje:
+
+- parte da base já existe via auditoria durável, snapshot analítico e trilha operacional;
+- ainda faltam relatórios operacionais completos, detecção de incidentes em massa, pós-mortem semi-automático e recomendações por recorrência.
 
 ## Backlog priorizado
 

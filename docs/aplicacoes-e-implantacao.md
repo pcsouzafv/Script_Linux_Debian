@@ -76,6 +76,8 @@ Ligar o backend aos sistemas oficiais.
 
 ### Fase 4: Camada de automacao segura
 
+Status atual: concluida no escopo atual do repositorio.
+
 Adicionar o motor de execucao de runbooks.
 
 - Manter o worker atual restrito a automacoes homologadas e read-only onde possivel.
@@ -84,7 +86,18 @@ Adicionar o motor de execucao de runbooks.
 - Amarrar cada automacao a papel, aprovacao, auditoria e rollback.
 - Integrar o backend a essa camada sem liberar shell arbitrario.
 
+Leitura pratica do status:
+
+- worker seguro implementado;
+- catalogo inicial homologado ativo;
+- aprovacao por risco e auditoria duravel validadas;
+- laboratorio com PostgreSQL e Redis operacionais para esse fluxo.
+
+Evolucoes futuras desta mesma frente ainda sao possiveis, mas ja passam a ser ampliacao da fase, nao pre-condicao para considera-la aberta.
+
 ### Fase 5: IA operacional e conhecimento
+
+Status atual: parcial.
 
 Acrescentar a camada de triagem e assistencia.
 
@@ -92,6 +105,13 @@ Acrescentar a camada de triagem e assistencia.
 - Evoluir a fila ja existente, que hoje ja tem retry com backoff persistido, dead-letter e runner externo homologado, para observabilidade operacional mais rica.
 - Indexar FAQ, artigos e runbooks.
 - Adicionar agentes apenas para resumo, classificacao e sugestao antes de liberar automacoes mais sensiveis.
+
+Leitura pratica do status:
+
+- triagem e enriquecimento inicial ja existem;
+- banco operacional, auditoria duravel e snapshot analitico ja existem;
+- fila operacional e retry persistido ja existem;
+- ainda faltam a camada real de conhecimento, indexacao, agentes de resumo/classificacao e relatorios operacionais mais completos.
 
 ## Topologia minima recomendada para o MVP
 
