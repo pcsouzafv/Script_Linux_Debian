@@ -13,12 +13,16 @@ case "$PROFILE" in
     zabbix)
         services=(db zabbix-server zabbix-web)
         ;;
+    ops)
+        PROFILE="ops"
+        services=(postgres redis)
+        ;;
     full|all)
         PROFILE="full"
-        services=(db glpi zabbix-server zabbix-web)
+        services=(db glpi zabbix-server zabbix-web postgres redis)
         ;;
     *)
-        echo "Uso: ./scripts/pull.sh [glpi|zabbix|full]" >&2
+        echo "Uso: ./scripts/pull.sh [glpi|zabbix|ops|full]" >&2
         exit 1
         ;;
 esac

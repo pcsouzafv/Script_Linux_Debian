@@ -2,6 +2,11 @@ name: helpdesk_lab
 
 services:
   db:
+    profiles:
+      - glpi
+      - zabbix
+      - full
+      - all
     image: mysql:8.4
     restart: unless-stopped
     command:
@@ -25,6 +30,66 @@ services:
     volumes:
       - db_data:/var/lib/mysql
       - ./runtime/initdb:/docker-entrypoint-initdb.d:ro
+    networks:
+      - helpdesk_lab
+
+  postgres:
+    profiles:
+      - ops
+      - full
+      - all
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${OPS_POSTGRES_DB}
+      POSTGRES_USER: ${OPS_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${OPS_POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    ports:
+      - 127.0.0.1:${POSTGRES_HOST_PORT}:5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./runtime/postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - helpdesk_lab
+
+  redis:
+    profiles:
+      - ops
+      - full
+      - all
+    image: redis:7-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_PASSWORD: ${OPS_REDIS_PASSWORD}
+    command:
+      - sh
+      - -c
+      - redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$${REDIS_PASSWORD}" ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    ports:
+      - 127.0.0.1:${REDIS_HOST_PORT}:6379
+    volumes:
+      - redis_data:/data
     networks:
       - helpdesk_lab
 
@@ -115,3 +180,7 @@ volumes:
     name: helpdesk_lab_db_data
   glpi_data:
     name: helpdesk_lab_glpi_data
+  postgres_data:
+    name: helpdesk_lab_postgres_data
+  redis_data:
+    name: helpdesk_lab_redis_data

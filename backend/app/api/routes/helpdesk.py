@@ -9,9 +9,21 @@ from app.core.dependencies import (
     get_llm_client,
     get_whatsapp_client,
 )
-from app.core.security import require_api_access
+from app.core.security import (
+    require_api_access,
+    require_audit_access,
+    require_automation_access,
+    require_automation_read_access,
+    require_automation_approval_access,
+)
 from app.orchestration.helpdesk import HelpdeskOrchestrator
 from app.schemas.helpdesk import (
+    AutomationJobCreateRequest,
+    AutomationJobDecisionRequest,
+    AutomationJobListResponse,
+    AutomationJobResponse,
+    AutomationSummaryResponse,
+    AuditEventListResponse,
     CorrelationRequest,
     CorrelationResponse,
     LLMGenerateRequest,
@@ -32,6 +44,9 @@ from app.services.whatsapp import WhatsAppClient
 
 router = APIRouter(tags=["helpdesk"])
 protected_dependencies = [Depends(require_api_access)]
+automation_write_dependencies = [Depends(require_automation_access)]
+automation_read_dependencies = [Depends(require_automation_read_access)]
+automation_approval_dependencies = [Depends(require_automation_approval_access)]
 
 
 @router.post(
@@ -69,6 +84,147 @@ async def get_ticket(
     orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
 ) -> TicketDetailsResponse:
     return await orchestrator.get_ticket(ticket_id)
+
+
+@router.get(
+    "/helpdesk/audit/events",
+    response_model=AuditEventListResponse,
+    dependencies=[Depends(require_audit_access)],
+)
+async def get_audit_events(
+    limit: int = Query(default=20, ge=1, le=100),
+    event_type: str | None = Query(default=None, min_length=3, max_length=80),
+    ticket_id: str | None = Query(default=None, min_length=2, max_length=120),
+    actor_external_id: str | None = Query(default=None, min_length=2, max_length=120),
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AuditEventListResponse:
+    return await orchestrator.list_audit_events(
+        limit=limit,
+        event_type=event_type,
+        ticket_id=ticket_id,
+        actor_external_id=actor_external_id,
+    )
+
+
+@router.post(
+    "/helpdesk/automation/jobs",
+    response_model=AutomationJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=automation_write_dependencies,
+)
+async def create_automation_job(
+    payload: AutomationJobCreateRequest,
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AutomationJobResponse:
+    try:
+        return await orchestrator.request_automation_job(payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/helpdesk/automation/jobs",
+    response_model=AutomationJobListResponse,
+    dependencies=automation_read_dependencies,
+)
+async def list_automation_jobs(
+    limit: int = Query(default=20, ge=1, le=100),
+    automation_name: str | None = Query(default=None, min_length=3, max_length=80),
+    ticket_id: str | None = Query(default=None, min_length=2, max_length=120),
+    approval_status: str | None = Query(default=None, min_length=4, max_length=40),
+    execution_status: str | None = Query(default=None, min_length=4, max_length=40),
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AutomationJobListResponse:
+    return await orchestrator.list_automation_jobs(
+        limit=limit,
+        automation_name=automation_name,
+        ticket_id=ticket_id,
+        approval_status=approval_status,
+        execution_status=execution_status,
+    )
+
+
+@router.get(
+    "/helpdesk/automation/summary",
+    response_model=AutomationSummaryResponse,
+    dependencies=automation_read_dependencies,
+)
+async def get_automation_summary(
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AutomationSummaryResponse:
+    return await orchestrator.get_automation_summary()
+
+
+@router.get(
+    "/helpdesk/automation/jobs/{job_id}",
+    response_model=AutomationJobResponse,
+    dependencies=automation_read_dependencies,
+)
+async def get_automation_job(
+    job_id: str,
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AutomationJobResponse:
+    return await orchestrator.get_automation_job(job_id)
+
+
+@router.post(
+    "/helpdesk/automation/jobs/{job_id}/approve",
+    response_model=AutomationJobResponse,
+    dependencies=automation_approval_dependencies,
+)
+async def approve_automation_job(
+    job_id: str,
+    payload: AutomationJobDecisionRequest,
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AutomationJobResponse:
+    try:
+        return await orchestrator.approve_automation_job(job_id, payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/helpdesk/automation/jobs/{job_id}/reject",
+    response_model=AutomationJobResponse,
+    dependencies=automation_approval_dependencies,
+)
+async def reject_automation_job(
+    job_id: str,
+    payload: AutomationJobDecisionRequest,
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AutomationJobResponse:
+    try:
+        return await orchestrator.reject_automation_job(job_id, payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/helpdesk/automation/jobs/{job_id}/cancel",
+    response_model=AutomationJobResponse,
+    dependencies=automation_approval_dependencies,
+)
+async def cancel_automation_job(
+    job_id: str,
+    payload: AutomationJobDecisionRequest,
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AutomationJobResponse:
+    try:
+        return await orchestrator.cancel_automation_job(job_id, payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get(

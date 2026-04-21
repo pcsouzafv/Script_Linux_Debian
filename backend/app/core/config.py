@@ -1,7 +1,8 @@
 import json
 from functools import lru_cache
+import re
 
-from pydantic import field_validator
+from pydantic import model_validator, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,15 @@ class Settings(BaseSettings):
     api_port_max: int = 18010
     api_port_strict: bool = False
     api_access_token: str | None = None
+    api_access_token_previous: str | None = None
+    audit_access_token: str | None = None
+    audit_access_token_previous: str | None = None
+    automation_access_token: str | None = None
+    automation_access_token_previous: str | None = None
+    automation_read_access_token: str | None = None
+    automation_read_access_token_previous: str | None = None
+    automation_approval_access_token: str | None = None
+    automation_approval_access_token_previous: str | None = None
     identity_provider: str = "glpi"
     identity_store_path: str = "data/identities.json"
     identity_glpi_user_profiles: list[str] = ["Self-Service"]
@@ -45,6 +55,22 @@ class Settings(BaseSettings):
     evolution_instance_name: str | None = None
     evolution_webhook_secret: str | None = None
 
+    operational_postgres_dsn: str | None = None
+    operational_postgres_schema: str = "helpdesk_platform"
+    operational_audit_retention_days: int | None = 30
+    operational_job_retention_days: int | None = 30
+    automation_approval_timeout_minutes: int | None = 1440
+    operational_payload_max_depth: int = 6
+    operational_payload_max_list_items: int = 20
+    operational_payload_max_object_keys: int = 50
+    operational_payload_max_string_length: int = 1024
+    redis_url: str | None = None
+    automation_worker_max_attempts: int = 3
+    automation_retry_base_seconds: int = 5
+    automation_retry_max_seconds: int = 300
+    automation_runner_base_dir: str = "../infra/automation-runner/projects"
+    automation_runner_timeout_seconds: int = 120
+
     llm_enabled: bool = False
     llm_provider: str = "ollama"
     llm_base_url: str | None = None
@@ -66,6 +92,15 @@ class Settings(BaseSettings):
 
     @field_validator(
         "api_access_token",
+        "api_access_token_previous",
+        "audit_access_token",
+        "audit_access_token_previous",
+        "automation_access_token",
+        "automation_access_token_previous",
+        "automation_read_access_token",
+        "automation_read_access_token_previous",
+        "automation_approval_access_token",
+        "automation_approval_access_token_previous",
         "glpi_base_url",
         "glpi_app_token",
         "glpi_user_token",
@@ -84,6 +119,8 @@ class Settings(BaseSettings):
         "evolution_api_key",
         "evolution_instance_name",
         "evolution_webhook_secret",
+        "operational_postgres_dsn",
+        "redis_url",
         "llm_base_url",
         "llm_api_key",
         "llm_model",
@@ -132,6 +169,364 @@ class Settings(BaseSettings):
             return None
 
         return normalized
+
+    @field_validator("operational_postgres_schema", mode="before")
+    @classmethod
+    def normalize_operational_postgres_schema(cls, value: object) -> str:
+        if value is None:
+            return "helpdesk_platform"
+
+        normalized = str(value).strip()
+        if not normalized:
+            return "helpdesk_platform"
+
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized) is None:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_POSTGRES_SCHEMA deve usar apenas letras, numeros e underscore."
+            )
+        return normalized
+
+    @field_validator("operational_audit_retention_days", mode="before")
+    @classmethod
+    def normalize_operational_audit_retention_days(cls, value: object) -> int | None:
+        if value is None:
+            return 30
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 30
+
+        retention_days = int(normalized)
+        if retention_days < 0:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_AUDIT_RETENTION_DAYS deve ser zero ou positivo."
+            )
+        if retention_days == 0:
+            return None
+        return retention_days
+
+    @field_validator("operational_job_retention_days", mode="before")
+    @classmethod
+    def normalize_operational_job_retention_days(cls, value: object) -> int | None:
+        if value is None:
+            return 30
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 30
+
+        retention_days = int(normalized)
+        if retention_days < 0:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_JOB_RETENTION_DAYS deve ser zero ou positivo."
+            )
+        if retention_days == 0:
+            return None
+        return retention_days
+
+    @field_validator("automation_approval_timeout_minutes", mode="before")
+    @classmethod
+    def normalize_automation_approval_timeout_minutes(cls, value: object) -> int | None:
+        if value is None:
+            return 1440
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 1440
+
+        timeout_minutes = int(normalized)
+        if timeout_minutes < 0:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_APPROVAL_TIMEOUT_MINUTES deve ser zero ou positivo."
+            )
+        if timeout_minutes == 0:
+            return None
+        if timeout_minutes > 10080:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_APPROVAL_TIMEOUT_MINUTES deve ficar abaixo de 10080 minutos."
+            )
+        return timeout_minutes
+
+    @field_validator("operational_payload_max_depth", mode="before")
+    @classmethod
+    def normalize_operational_payload_max_depth(cls, value: object) -> int:
+        if value is None:
+            return 6
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 6
+
+        max_depth = int(normalized)
+        if max_depth <= 0:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_PAYLOAD_MAX_DEPTH deve ser maior que zero."
+            )
+        if max_depth > 12:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_PAYLOAD_MAX_DEPTH deve ficar abaixo de 12 niveis."
+            )
+        return max_depth
+
+    @field_validator("operational_payload_max_list_items", mode="before")
+    @classmethod
+    def normalize_operational_payload_max_list_items(cls, value: object) -> int:
+        if value is None:
+            return 20
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 20
+
+        max_items = int(normalized)
+        if max_items <= 0:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_PAYLOAD_MAX_LIST_ITEMS deve ser maior que zero."
+            )
+        if max_items > 200:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_PAYLOAD_MAX_LIST_ITEMS deve ficar abaixo de 200 itens."
+            )
+        return max_items
+
+    @field_validator("operational_payload_max_object_keys", mode="before")
+    @classmethod
+    def normalize_operational_payload_max_object_keys(cls, value: object) -> int:
+        if value is None:
+            return 50
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 50
+
+        max_keys = int(normalized)
+        if max_keys <= 0:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_PAYLOAD_MAX_OBJECT_KEYS deve ser maior que zero."
+            )
+        if max_keys > 200:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_PAYLOAD_MAX_OBJECT_KEYS deve ficar abaixo de 200 chaves."
+            )
+        return max_keys
+
+    @field_validator("operational_payload_max_string_length", mode="before")
+    @classmethod
+    def normalize_operational_payload_max_string_length(cls, value: object) -> int:
+        if value is None:
+            return 1024
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 1024
+
+        max_string_length = int(normalized)
+        if max_string_length < 64:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_PAYLOAD_MAX_STRING_LENGTH deve ser de pelo menos 64 caracteres."
+            )
+        if max_string_length > 16384:
+            raise ValueError(
+                "HELPDESK_OPERATIONAL_PAYLOAD_MAX_STRING_LENGTH deve ficar abaixo de 16384 caracteres."
+            )
+        return max_string_length
+
+    @field_validator("automation_worker_max_attempts", mode="before")
+    @classmethod
+    def normalize_automation_worker_max_attempts(cls, value: object) -> int:
+        if value is None:
+            return 3
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 3
+
+        max_attempts = int(normalized)
+        if max_attempts <= 0:
+            raise ValueError("HELPDESK_AUTOMATION_WORKER_MAX_ATTEMPTS deve ser maior que zero.")
+        if max_attempts > 10:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_WORKER_MAX_ATTEMPTS deve ficar entre 1 e 10 para evitar retentativas excessivas."
+            )
+        return max_attempts
+
+    @field_validator("automation_runner_base_dir", mode="before")
+    @classmethod
+    def normalize_automation_runner_base_dir(cls, value: object) -> str:
+        if value is None:
+            return "../infra/automation-runner/projects"
+
+        normalized = str(value).strip()
+        if not normalized:
+            return "../infra/automation-runner/projects"
+        return normalized
+
+    @field_validator("automation_runner_timeout_seconds", mode="before")
+    @classmethod
+    def normalize_automation_runner_timeout_seconds(cls, value: object) -> int:
+        if value is None:
+            return 120
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 120
+
+        timeout_seconds = int(normalized)
+        if timeout_seconds <= 0:
+            raise ValueError("HELPDESK_AUTOMATION_RUNNER_TIMEOUT_SECONDS deve ser maior que zero.")
+        if timeout_seconds > 3600:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_RUNNER_TIMEOUT_SECONDS deve ficar abaixo de 3600 segundos."
+            )
+        return timeout_seconds
+
+    @field_validator("automation_retry_base_seconds", mode="before")
+    @classmethod
+    def normalize_automation_retry_base_seconds(cls, value: object) -> int:
+        if value is None:
+            return 5
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 5
+
+        retry_base_seconds = int(normalized)
+        if retry_base_seconds <= 0:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_RETRY_BASE_SECONDS deve ser maior que zero."
+            )
+        if retry_base_seconds > 3600:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_RETRY_BASE_SECONDS deve ficar abaixo de 3600 segundos."
+            )
+        return retry_base_seconds
+
+    @field_validator("automation_retry_max_seconds", mode="before")
+    @classmethod
+    def normalize_automation_retry_max_seconds(cls, value: object) -> int:
+        if value is None:
+            return 300
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 300
+
+        retry_max_seconds = int(normalized)
+        if retry_max_seconds <= 0:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_RETRY_MAX_SECONDS deve ser maior que zero."
+            )
+        if retry_max_seconds > 86400:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_RETRY_MAX_SECONDS deve ficar abaixo de 86400 segundos."
+            )
+        return retry_max_seconds
+
+    @model_validator(mode="after")
+    def validate_retry_backoff_configuration(self) -> "Settings":
+        if self.automation_retry_max_seconds < self.automation_retry_base_seconds:
+            raise ValueError(
+                "HELPDESK_AUTOMATION_RETRY_MAX_SECONDS deve ser maior ou igual a HELPDESK_AUTOMATION_RETRY_BASE_SECONDS."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_token_configuration(self) -> "Settings":
+        scope_pairs = {
+            "API_ACCESS_TOKEN": (
+                self.api_access_token,
+                self.api_access_token_previous,
+            ),
+            "AUDIT_ACCESS_TOKEN": (
+                self.audit_access_token,
+                self.audit_access_token_previous,
+            ),
+            "AUTOMATION_ACCESS_TOKEN": (
+                self.automation_access_token,
+                self.automation_access_token_previous,
+            ),
+            "AUTOMATION_READ_ACCESS_TOKEN": (
+                self.automation_read_access_token,
+                self.automation_read_access_token_previous,
+            ),
+            "AUTOMATION_APPROVAL_ACCESS_TOKEN": (
+                self.automation_approval_access_token,
+                self.automation_approval_access_token_previous,
+            ),
+        }
+        normalized_tokens: dict[str, set[str]] = {}
+
+        for scope_name, (current_token, previous_token) in scope_pairs.items():
+            if previous_token and not current_token:
+                raise ValueError(
+                    f"HELPDESK_{scope_name} deve estar definido antes de HELPDESK_{scope_name}_PREVIOUS."
+                )
+
+            scope_tokens = {token for token in {current_token, previous_token} if token}
+            if len(scope_tokens) == 1 and current_token and previous_token:
+                raise ValueError(
+                    f"HELPDESK_{scope_name}_PREVIOUS deve ser diferente do token atual."
+                )
+
+            normalized_tokens[scope_name] = scope_tokens
+
+        api_tokens = normalized_tokens["API_ACCESS_TOKEN"]
+        audit_tokens = normalized_tokens["AUDIT_ACCESS_TOKEN"]
+        automation_tokens = normalized_tokens["AUTOMATION_ACCESS_TOKEN"]
+        automation_read_tokens = normalized_tokens["AUTOMATION_READ_ACCESS_TOKEN"]
+        automation_approval_tokens = normalized_tokens["AUTOMATION_APPROVAL_ACCESS_TOKEN"]
+
+        if api_tokens & audit_tokens:
+            raise ValueError(
+                "Os tokens administrativos de auditoria devem ser diferentes dos tokens internos gerais da API."
+            )
+
+        if api_tokens & automation_tokens:
+            raise ValueError(
+                "Os tokens de automacao devem ser diferentes dos tokens internos gerais da API."
+            )
+
+        if audit_tokens & automation_tokens:
+            raise ValueError(
+                "Os tokens de automacao devem ser diferentes dos tokens administrativos de auditoria."
+            )
+
+        if api_tokens & automation_read_tokens:
+            raise ValueError(
+                "Os tokens de leitura de automacao devem ser diferentes dos tokens internos gerais da API."
+            )
+
+        if audit_tokens & automation_read_tokens:
+            raise ValueError(
+                "Os tokens de leitura de automacao devem ser diferentes dos tokens administrativos de auditoria."
+            )
+
+        if automation_tokens & automation_read_tokens:
+            raise ValueError(
+                "Os tokens de leitura de automacao devem ser diferentes dos tokens administrativos de criacao de automacao."
+            )
+
+        if api_tokens & automation_approval_tokens:
+            raise ValueError(
+                "Os tokens de aprovacao de automacao devem ser diferentes dos tokens internos gerais da API."
+            )
+
+        if audit_tokens & automation_approval_tokens:
+            raise ValueError(
+                "Os tokens de aprovacao de automacao devem ser diferentes dos tokens administrativos de auditoria."
+            )
+
+        if automation_read_tokens & automation_approval_tokens:
+            raise ValueError(
+                "Os tokens de aprovacao de automacao devem ser diferentes dos tokens administrativos de leitura de automacao."
+            )
+
+        if automation_tokens & automation_approval_tokens:
+            raise ValueError(
+                "Os tokens de aprovacao de automacao devem ser diferentes dos tokens administrativos gerais de automacao."
+            )
+
+        return self
 
     @field_validator("whatsapp_delivery_provider", mode="before")
     @classmethod

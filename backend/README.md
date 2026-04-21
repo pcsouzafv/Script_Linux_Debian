@@ -56,6 +56,18 @@ O arquivo [backend/.env](/home/ricardo/Script_Linux_Debian/backend/.env) já foi
 
 As rotas internas sob `/api/v1/helpdesk/*` e o endpoint bruto `/api/v1/webhooks/whatsapp/messages` exigem um token de acesso enviado em `X-Helpdesk-API-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_API_ACCESS_TOKEN` antes de consumir ou publicar essas rotas.
 
+A rota administrativa `GET /api/v1/helpdesk/audit/events` usa credencial separada, enviada em `X-Helpdesk-Audit-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_AUDIT_ACCESS_TOKEN`; sem isso, a consulta de auditoria responde como indisponível por seguranca.
+
+A rota administrativa `POST /api/v1/helpdesk/automation/jobs` usa um terceiro escopo dedicado, enviado em `X-Helpdesk-Automation-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_AUTOMATION_ACCESS_TOKEN`; sem isso, o backend bloqueia a criacao de jobs administrativos.
+
+As rotas administrativas de leitura `GET /api/v1/helpdesk/automation/jobs`, `GET /api/v1/helpdesk/automation/jobs/{job_id}` e `GET /api/v1/helpdesk/automation/summary` aceitam um escopo proprio em `X-Helpdesk-Automation-Read-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_AUTOMATION_READ_ACCESS_TOKEN` para separar leitura de escrita; se ele nao estiver definido, o backend faz fallback controlado para `HELPDESK_AUTOMATION_ACCESS_TOKEN`.
+
+As rotas de aprovacao `POST /api/v1/helpdesk/automation/jobs/{job_id}/approve`, `POST /api/v1/helpdesk/automation/jobs/{job_id}/reject` e `POST /api/v1/helpdesk/automation/jobs/{job_id}/cancel` usam um quarto escopo separado, enviado em `X-Helpdesk-Automation-Approval-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_AUTOMATION_APPROVAL_ACCESS_TOKEN`; sem isso, o backend bloqueia decisoes de aprovacao, rejeicao e cancelamento.
+
+Os campos administrativos `requested_by` e `acted_by` aceitam apenas identificadores operacionais estruturados, sem espacos, como `ops-ana`, `supervisor-ana` ou `ops.ana@example.com`. Isso evita texto livre nesses metadados de auditoria.
+
+Para rotacao sem downtime, voce pode manter simultaneamente o token atual e o imediatamente anterior usando `HELPDESK_API_ACCESS_TOKEN_PREVIOUS`, `HELPDESK_AUDIT_ACCESS_TOKEN_PREVIOUS`, `HELPDESK_AUTOMATION_ACCESS_TOKEN_PREVIOUS`, `HELPDESK_AUTOMATION_READ_ACCESS_TOKEN_PREVIOUS` e `HELPDESK_AUTOMATION_APPROVAL_ACCESS_TOKEN_PREVIOUS`.
+
 Modos aceitos no backend:
 
 - GLPI: `user_token` ou `username/password`
@@ -70,6 +82,232 @@ No laboratorio local, o repositório ja vem preparado para usar:
 - `HELPDESK_ZABBIX_USERNAME=Admin`
 - `HELPDESK_ZABBIX_PASSWORD=zabbix`
 - `HELPDESK_IDENTITY_STORE_PATH=data/identities.lab.json`
+
+Persistencia operacional ja suportada no backend:
+
+- `HELPDESK_OPERATIONAL_POSTGRES_DSN`
+- `HELPDESK_OPERATIONAL_POSTGRES_SCHEMA`
+- `HELPDESK_OPERATIONAL_AUDIT_RETENTION_DAYS`
+- `HELPDESK_OPERATIONAL_JOB_RETENTION_DAYS`
+- `HELPDESK_AUTOMATION_APPROVAL_TIMEOUT_MINUTES`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_DEPTH`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_LIST_ITEMS`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_OBJECT_KEYS`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_STRING_LENGTH`
+- `HELPDESK_REDIS_URL`
+- `HELPDESK_AUTOMATION_WORKER_MAX_ATTEMPTS`
+- `HELPDESK_AUTOMATION_RETRY_BASE_SECONDS`
+- `HELPDESK_AUTOMATION_RETRY_MAX_SECONDS`
+
+Segregacao de acesso administrativo:
+
+- `HELPDESK_AUDIT_ACCESS_TOKEN`
+- `HELPDESK_AUTOMATION_ACCESS_TOKEN`
+- `HELPDESK_AUTOMATION_READ_ACCESS_TOKEN`
+- `HELPDESK_AUTOMATION_APPROVAL_ACCESS_TOKEN`
+- `HELPDESK_API_ACCESS_TOKEN_PREVIOUS`
+- `HELPDESK_AUDIT_ACCESS_TOKEN_PREVIOUS`
+- `HELPDESK_AUTOMATION_ACCESS_TOKEN_PREVIOUS`
+- `HELPDESK_AUTOMATION_READ_ACCESS_TOKEN_PREVIOUS`
+- `HELPDESK_AUTOMATION_APPROVAL_ACCESS_TOKEN_PREVIOUS`
+
+Quando `HELPDESK_OPERATIONAL_POSTGRES_DSN` estiver configurado, o backend passa a persistir sessoes do autoatendimento, eventos minimos de auditoria e `job_request` de automacao em PostgreSQL. Sem esse DSN, o comportamento continua funcional com fallback em memoria local do processo.
+
+`HELPDESK_OPERATIONAL_POSTGRES_SCHEMA` controla o schema usado pelo backend e aceita apenas letras, numeros e underscore. O valor padrao e `helpdesk_platform`.
+
+`HELPDESK_OPERATIONAL_AUDIT_RETENTION_DAYS` define por quantos dias os eventos de auditoria ficam retidos no banco operacional. O padrao e `30`. Use `0` para desabilitar a limpeza automatica.
+
+`HELPDESK_OPERATIONAL_JOB_RETENTION_DAYS` define por quantos dias jobs administrativos em estado terminal (`completed`, `dead-letter` e `rejected`) ficam retidos no store operacional. O padrao e `30`. Use `0` para desabilitar a limpeza automatica.
+
+`HELPDESK_AUTOMATION_APPROVAL_TIMEOUT_MINUTES` define por quantos minutos um job manual pode permanecer em `pending/awaiting-approval` antes de ser rejeitado automaticamente. O padrao e `1440` minutos. Use `0` para desabilitar essa expiração.
+
+Os payloads operacionais persistidos em `audit_event.payload_json` e `job_request.payload_json` passam por truncamento e sanitizacao centralizados antes de serem gravados. Os limites atuais sao configurados por:
+
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_DEPTH`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_LIST_ITEMS`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_OBJECT_KEYS`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_STRING_LENGTH`
+
+Isso reduz risco de abuso por JSON excessivamente profundo, listas grandes e strings muito longas em trilhas administrativas e resultados de automacao.
+
+O backend grava apenas metadados operacionais nesses eventos de auditoria. Conteudo livre de mensagem, comentarios completos e transcricoes detalhadas continuam fora da trilha de auditoria para reduzir exposicao de dados sensiveis.
+
+Tambem existe a rota interna `GET /api/v1/helpdesk/audit/events`, protegida por token administrativo proprio. Ela permite apenas filtros fechados por `event_type`, `ticket_id` e `actor_external_id`, com limite maximo de `100` registros por consulta.
+
+O backend bloqueia configuracoes inseguras nesta area:
+
+- token atual e token anterior nao podem ser iguais no mesmo escopo;
+- tokens de auditoria nao podem ser reutilizados no escopo interno geral da API;
+- tokens de automacao nao podem ser reutilizados nem no escopo interno geral da API nem no escopo administrativo de auditoria;
+- tokens de leitura de automacao nao podem ser reutilizados nos escopos de API, auditoria, criacao de automacao ou aprovacao;
+- tokens de aprovacao de automacao nao podem ser reutilizados em nenhum dos outros escopos administrativos ou internos;
+- token anterior nao pode existir sem token atual no mesmo escopo.
+
+`HELPDESK_REDIS_URL` agora alimenta a fila dos jobs administrativos de automacao. Sem Redis, o backend e o worker seguem funcionais apenas com fallback em memoria no processo atual, adequado para desenvolvimento e testes, nao para producao.
+
+`HELPDESK_AUTOMATION_WORKER_MAX_ATTEMPTS` define quantas execucoes totais um job pode receber antes de ir para dead-letter. O padrao e `3`, com limite maximo de `10` para evitar retentativas excessivas.
+
+`HELPDESK_AUTOMATION_RETRY_BASE_SECONDS` define o atraso base da primeira retentativa agendada. `HELPDESK_AUTOMATION_RETRY_MAX_SECONDS` limita o teto do backoff exponencial persistido no `job_request`. Os padroes atuais sao `5` e `300` segundos, respectivamente.
+
+`HELPDESK_AUTOMATION_RUNNER_BASE_DIR` define onde ficam os projetos homologados do Ansible Runner. O padrao atual aponta para `../infra/automation-runner/projects`.
+
+`HELPDESK_AUTOMATION_RUNNER_TIMEOUT_SECONDS` define o timeout maximo de cada playbook homologado disparado pelo runner. O padrao e `120` segundos.
+
+## Jobs de automacao
+
+O backend agora disponibiliza um worker assíncrono minimo para jobs administrativos seguros.
+
+Guardrails atuais:
+
+- somente automacoes homologadas entram na fila;
+- automacoes de risco moderado ficam em `awaiting-approval` e so entram na fila apos aprovacao explicita;
+- jobs manuais pendentes alem da janela configurada sao rejeitados automaticamente antes de novas leituras ou tentativas de approve/reject, com evento `automation_job_approval_expired` na trilha de auditoria;
+- nenhuma execucao livre de shell ou comando arbitrario;
+- toda execucao fica vinculada a `job_request` e trilha minima de auditoria;
+- o worker faz aquisicao atomica do job ao transicionar de `queued` para `running`, evitando consumo duplicado por mais de um processo.
+- falhas transitorias nao deixam o job em loop infinito: cada job carrega `attempt_count` e `max_attempts` persistidos no proprio `job_request`.
+- falhas abaixo do limite nao voltam imediatamente para a fila principal: o job entra em `retry-scheduled`, com `retry_scheduled_at` e `retry_delay_seconds` persistidos no store operacional.
+- retentativas vencidas sao adquiridas primeiro pelo worker direto do store operacional, reduzindo churn na fila principal e mantendo o proximo disparo auditavel.
+- jobs ja aprovados ainda nao executados podem ser encerrados em `cancelled`; quando estavam em `queued`, o backend tambem remove o `job_id` da fila primaria para reduzir a janela de execucao indevida.
+- ao atingir o limite de tentativas, o job sai da fila principal e vai para dead-letter dedicado, preservando o ultimo erro operacional.
+- payloads de request, resultado, notas e artefatos persistidos no `job_request` passam por limites de profundidade, quantidade de itens/chaves e tamanho de string antes de serem gravados.
+- jobs terminalizados antigos sao removidos automaticamente conforme `HELPDESK_OPERATIONAL_JOB_RETENTION_DAYS`, reduzindo exposicao desnecessaria de historico administrativo.
+- se um `job_id` aparecer na fila sem aprovacao valida, o worker bloqueia a execucao e registra auditoria `automation_job_blocked`.
+
+As respostas de `GET /api/v1/helpdesk/automation/jobs` e `GET /api/v1/helpdesk/automation/jobs/{job_id}` agora expõem tambem `retry_scheduled_at` e `retry_delay_seconds` quando houver nova tentativa pendente.
+
+O resumo protegido `GET /api/v1/helpdesk/automation/summary` entrega somente metadados operacionais agregados: contagem por `approval_status` e `execution_status`, profundidade da fila principal e da dead-letter, alem das marcas de tempo mais antigas para jobs aguardando aprovacao, enfileirados, em execucao e com retry agendado. O endpoint nao devolve `payload_json`, reduzindo exposicao de contexto operacional sensivel durante troubleshooting.
+
+Catalogo inicial:
+
+- `ansible.ping_localhost`: `low` + `auto`, executa um playbook homologado de baixo risco via Ansible Runner para validar o runner local.
+- `ansible.ticket_context_probe`: `moderate` + `manual`, executa um playbook homologado read-only via Ansible Runner, exige `ticket_id` e devolve um artefato estruturado com contexto operacional minimo do chamado.
+- `noop.healthcheck`: `low` + `auto`, valida o caminho fila -> worker -> persistencia sem efeito colateral.
+- `glpi.ticket_snapshot`: `moderate` + `manual`, consulta somente leitura de metadados operacionais do ticket no GLPI ou no mock local.
+
+Os projetos homologados atuais do runner ficam em:
+
+- `infra/automation-runner/projects/ping-localhost/`
+- `infra/automation-runner/projects/ticket-context-probe/`
+
+Subir o worker localmente:
+
+```bash
+cd backend
+./run_automation_worker.sh
+```
+
+Criar um job de smoke test:
+
+```bash
+curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/automation/jobs \
+  -H "X-Helpdesk-Automation-Key: $HELPDESK_AUTOMATION_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requested_by": "ops-ana",
+    "automation_name": "noop.healthcheck",
+    "reason": "smoke local da fila",
+    "parameters": {"probe_label": "lab"}
+  }'
+```
+
+Criar um job homologado vinculado a ticket:
+
+```bash
+curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/automation/jobs \
+  -H "X-Helpdesk-Automation-Key: $HELPDESK_AUTOMATION_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requested_by": "ops-ana",
+    "automation_name": "ansible.ticket_context_probe",
+    "ticket_id": "GLPI-LOCAL-123",
+    "reason": "coletar contexto minimo do chamado para diagnostico",
+    "parameters": {"context_label": "diagnostico-local"}
+  }'
+```
+
+Esse segundo exemplo retorna o job em `awaiting-approval`, sem enfileirar automaticamente.
+
+Aprovar um job pendente:
+
+```bash
+curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/automation/jobs/<job_id>/approve \
+  -H "X-Helpdesk-Automation-Approval-Key: $HELPDESK_AUTOMATION_APPROVAL_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "acted_by": "supervisor-ana",
+    "reason_code": "read_only_diagnostic_authorized"
+  }'
+```
+
+Rejeitar um job pendente:
+
+```bash
+curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/automation/jobs/<job_id>/reject \
+  -H "X-Helpdesk-Automation-Approval-Key: $HELPDESK_AUTOMATION_APPROVAL_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "acted_by": "supervisor-ana",
+    "reason_code": "outside_change_window"
+  }'
+```
+
+Cancelar um job aprovado que ainda nao executou:
+
+```bash
+curl -X POST http://127.0.0.1:18001/api/v1/helpdesk/automation/jobs/<job_id>/cancel \
+  -H "X-Helpdesk-Automation-Approval-Key: $HELPDESK_AUTOMATION_APPROVAL_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "acted_by": "supervisor-ana",
+    "reason_code": "change_revoked"
+  }'
+```
+
+As decisoes administrativas nao aceitam mais texto livre em `approve`, `reject` ou `cancel`. Use `reason_code` padronizado:
+
+- `approve`: `change_window_validated`, `read_only_diagnostic_authorized`, `risk_review_completed`, `rollback_plan_confirmed`
+- `reject`: `outside_change_window`, `risk_not_authorized`, `missing_prerequisites`, `insufficient_evidence`
+- `cancel`: `change_revoked`, `scope_changed`, `duplicate_request`, `manual_intervention_completed`
+
+Consultar jobs recentes:
+
+```bash
+curl http://127.0.0.1:18001/api/v1/helpdesk/automation/jobs \
+  -H "X-Helpdesk-Automation-Read-Key: $HELPDESK_AUTOMATION_READ_ACCESS_TOKEN"
+```
+
+Consultar o resumo operacional protegido da fila:
+
+```bash
+curl http://127.0.0.1:18001/api/v1/helpdesk/automation/summary \
+  -H "X-Helpdesk-Automation-Read-Key: $HELPDESK_AUTOMATION_READ_ACCESS_TOKEN"
+```
+
+Cada resposta de job agora devolve tambem:
+
+- `risk_level`
+- `approval_mode`
+- `approval_required`
+- `attempt_count`
+- `max_attempts`
+- `last_error`
+- `dead_lettered_at`
+- `approval_reason_code`
+- `cancelled_by`
+- `cancellation_reason_code`
+- `cancellation_reason`
+- `cancelled_at`
+- `approval_acted_by`
+- `approval_reason`
+- `approval_updated_at`
+
+Isso permite diferenciar rapidamente jobs ainda reexecutaveis de jobs descartados para analise posterior.
+
+Nos jobs baseados em Ansible Runner, o resultado agora tambem pode incluir:
+
+- `artifact_data`: retorno estruturado e sanitizado exportado pelo playbook homologado;
+- `stdout_excerpt`: trecho curto do stdout do runner, util para troubleshooting sem vazar comandos arbitrarios.
 
 ## IA do bot
 
@@ -217,6 +455,14 @@ Para verificar a porta escolhida sem subir a API:
 - `POST /api/v1/helpdesk/tickets/open`
 - `POST /api/v1/helpdesk/triage`
 - `GET /api/v1/helpdesk/tickets/{ticket_id}`
+- `GET /api/v1/helpdesk/audit/events`
+- `POST /api/v1/helpdesk/automation/jobs`
+- `GET /api/v1/helpdesk/automation/jobs`
+- `GET /api/v1/helpdesk/automation/summary`
+- `GET /api/v1/helpdesk/automation/jobs/{job_id}`
+- `POST /api/v1/helpdesk/automation/jobs/{job_id}/approve`
+- `POST /api/v1/helpdesk/automation/jobs/{job_id}/reject`
+- `POST /api/v1/helpdesk/automation/jobs/{job_id}/cancel`
 - `GET /api/v1/helpdesk/identities/{phone_number}`
 - `POST /api/v1/helpdesk/incidents/correlate`
 - `GET /api/v1/helpdesk/ai/status`
@@ -257,6 +503,37 @@ Depois disso, reinicie o backend:
 cd /home/ricardo/Script_Linux_Debian/backend
 ./run_dev.sh
 ```
+
+## Backfill analitico do GLPI
+
+Para enriquecer tickets historicos que foram abertos antes da persistencia de `externalid`, `requesttypes_id`, `itilcategories_id` e vinculo com inventario, rode primeiro em `dry-run`:
+
+```bash
+cd /home/ricardo/Script_Linux_Debian/backend
+./run_glpi_backfill.sh --limit 25
+```
+
+O comando prioriza o evento operacional `ticket_opened` gravado no PostgreSQL e usa a triagem local por regras apenas como fallback para sugerir categoria. Quando quiser aplicar as atualizacoes no GLPI, repita com `--apply`:
+
+```bash
+./run_glpi_backfill.sh --limit 25 --apply
+```
+
+Para inspecionar tickets especificos, repita `--ticket-id`:
+
+```bash
+./run_glpi_backfill.sh --ticket-id 20 --ticket-id 22 --apply
+```
+
+Observacao: tickets `closed` podem aparecer no `dry-run`, mas a API do GLPI costuma bloquear a atualizacao analitica desses registros. No laboratorio, se voce realmente precisar materializar esse backfill em tickets ja encerrados, faca isso por ajuste controlado no banco do lab e nao pelo endpoint do GLPI.
+
+Para materializar uma camada analitica simples em PostgreSQL com os tickets enriquecidos do GLPI, sincronize snapshots para `${HELPDESK_OPERATIONAL_POSTGRES_SCHEMA}.ticket_analytics_snapshot`:
+
+```bash
+./run_glpi_analytics_sync.sh --limit 25
+```
+
+O sync usa detalhes do ticket no GLPI e, quando existir, o evento durável `ticket_opened` para completar `asset_name`, `service_name`, `source_channel`, `routed_to` e `correlation_event_count`.
 
 ## Exemplo de abertura direta de ticket
 

@@ -1,0 +1,29 @@
+---
+- name: Emit sanitized ticket context for homologated backend probe
+  hosts: localhost
+  gather_facts: false
+  vars:
+    helpdesk_ticket_context_safe: "{{ helpdesk_ticket_context | default({}) }}"
+  tasks:
+    - name: Announce ticket-bound probe
+      ansible.builtin.debug:
+        msg: >-
+          ticket_id={{ helpdesk_ticket_id | default('unknown') }}
+          label={{ context_label | default('none') }}
+          status={{ helpdesk_ticket_context_safe.status | default('unknown') }}
+
+    - name: Export sanitized ticket probe artifact
+      ansible.builtin.set_stats:
+        data:
+          helpdesk_ticket_probe:
+            automation_name: "{{ helpdesk_automation_name | default('unknown') }}"
+            ticket_id: "{{ helpdesk_ticket_id | default('unknown') }}"
+            context_label: "{{ context_label | default('') }}"
+            ticket_context:
+              status: "{{ helpdesk_ticket_context_safe.status | default('unknown') }}"
+              priority: "{{ helpdesk_ticket_context_safe.priority | default('unknown') }}"
+              updated_at: "{{ helpdesk_ticket_context_safe.updated_at | default('') }}"
+              requester_glpi_user_id: "{{ helpdesk_ticket_context_safe.requester_glpi_user_id | default('') }}"
+              assigned_glpi_user_id: "{{ helpdesk_ticket_context_safe.assigned_glpi_user_id | default('') }}"
+              followup_count: "{{ helpdesk_ticket_context_safe.followup_count | default(0) }}"
+              integration_mode: "{{ helpdesk_ticket_context_safe.integration_mode | default('unknown') }}"

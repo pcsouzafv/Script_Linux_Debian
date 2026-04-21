@@ -1,6 +1,6 @@
 # Helpdesk Lab
 
-Laboratorio isolado para subir `GLPI + Zabbix` em `Docker Compose` sem tocar nos containers, imagens, volumes e portas dos servicos ja existentes no host.
+Laboratorio isolado para subir `GLPI + Zabbix + PostgreSQL + Redis` em `Docker Compose` sem tocar nos containers, imagens, volumes e portas dos servicos ja existentes no host.
 
 ## Objetivo
 
@@ -19,12 +19,14 @@ Este laboratorio sobe:
 - `glpi`: interface e aplicacao do GLPI;
 - `zabbix-server`: backend do Zabbix;
 - `zabbix-web`: frontend web do Zabbix.
+- `postgres`: banco operacional dedicado ao backend, auditoria e historico de jobs;
+- `redis`: fila principal do worker seguro de automacao; retentativas agendadas ficam persistidas no estado operacional do backend.
 
 Tudo fica isolado em:
 
 - rede Docker `helpdesk_lab`;
 - volumes `helpdesk_lab_*`;
-- portas locais `127.0.0.1:8088` e `127.0.0.1:8089` por padrao.
+- portas locais `127.0.0.1:8088`, `127.0.0.1:8089`, `127.0.0.1:5433` e `127.0.0.1:6380` por padrao.
 
 ## Nao toca nos servicos atuais
 
@@ -59,14 +61,17 @@ infra/helpdesk-lab/
 │   ├── seed-zabbix-runtime.sh
 │   └── up.sh
 └── templates/
-    └── initdb/
-        └── 01-bootstrap.sql.template
+    ├── initdb/
+    │   └── 01-bootstrap.sql.template
+    └── postgres-init/
+        └── 01-helpdesk-platform.sql.template
 ```
 
 ## Perfis
 
 - `glpi`: sobe `db + glpi`
 - `zabbix`: sobe `db + zabbix-server + zabbix-web`
+- `ops`: sobe `postgres + redis`
 - `full`: sobe tudo
 
 ## Fluxo recomendado
@@ -76,6 +81,8 @@ infra/helpdesk-lab/
 3. Rodar o preflight.
 4. Fazer `pull` apenas do perfil que vai usar.
 5. Subir o perfil escolhido.
+
+Se o `.env` ja existir de uma versao anterior do laboratorio, `./scripts/prepare.sh` agora completa automaticamente as chaves novas que estiverem faltando a partir do `.env.example`, sem sobrescrever valores ja definidos.
 
 ## Comandos
 
@@ -97,6 +104,7 @@ Baixar imagens de um perfil especifico:
 ```bash
 ./scripts/pull.sh glpi
 ./scripts/pull.sh zabbix
+./scripts/pull.sh ops
 ./scripts/pull.sh full
 ```
 
@@ -105,6 +113,7 @@ Subir o laboratorio:
 ```bash
 ./scripts/up.sh glpi
 ./scripts/up.sh zabbix
+./scripts/up.sh ops
 ./scripts/up.sh full
 ```
 
@@ -152,6 +161,36 @@ O fluxo completo agora:
 - inclui a maquina local com checks de portas publicadas no IP LAN;
 - cria ou atualiza uma regra de descoberta `Descoberta LAN local` para a sub-rede atual.
 
+Quando o backend for alinhado por `bootstrap-integrations.sh`, o script tambem passa a preencher no `backend/.env`:
+
+- `HELPDESK_OPERATIONAL_POSTGRES_DSN`
+- `HELPDESK_OPERATIONAL_POSTGRES_SCHEMA`
+- `HELPDESK_REDIS_URL`
+
+Com `HELPDESK_OPERATIONAL_POSTGRES_DSN` preenchido, o backend ja consegue persistir sessoes do autoatendimento, eventos minimos de auditoria e historico de `job_request` nesse PostgreSQL. Sem esse DSN, ele continua funcional com fallback em memoria local.
+
+Com `HELPDESK_REDIS_URL` preenchido e o worker iniciado por `backend/run_automation_worker.sh`, o laboratorio passa a executar o catalogo inicial de automacoes homologadas pelo backend. Sem Redis, o worker ainda funciona no fallback em memoria apenas para desenvolvimento local.
+
+O fluxo atual do worker ja inclui retentativas finitas com backoff exponencial persistido, estado `retry-scheduled` e fila de dead-letter separada. Isso permite exercitar falhas controladas no laboratorio sem reencaminhar imediatamente o mesmo job para a fila principal.
+
+Se quiser encurtar ou alongar a janela entre tentativas no laboratorio, ajuste no `backend/.env`:
+
+- `HELPDESK_AUTOMATION_RETRY_BASE_SECONDS`
+- `HELPDESK_AUTOMATION_RETRY_MAX_SECONDS`
+
+Se quiser endurecer ou relaxar o volume de dados administrativos persistidos no laboratorio, ajuste tambem no `backend/.env`:
+
+- `HELPDESK_OPERATIONAL_JOB_RETENTION_DAYS`
+- `HELPDESK_AUTOMATION_APPROVAL_TIMEOUT_MINUTES`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_DEPTH`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_LIST_ITEMS`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_OBJECT_KEYS`
+- `HELPDESK_OPERATIONAL_PAYLOAD_MAX_STRING_LENGTH`
+
+`HELPDESK_AUTOMATION_APPROVAL_TIMEOUT_MINUTES` controla por quanto tempo um job manual pode ficar aguardando revisao antes de ser rejeitado automaticamente pelo backend, com auditoria minima do vencimento.
+
+`HELPDESK_OPERATIONAL_POSTGRES_SCHEMA` segue o valor de `OPS_POSTGRES_SCHEMA`, permitindo manter o schema operacional isolado do restante do banco.
+
 O seed de runtime conecta o `zabbix-server` do laboratorio nas redes Docker dos stacks em execucao apenas para permitir monitoramento por IP interno. Os containers existentes nao sao recriados nem reiniciados.
 
 Parar o laboratorio sem remover dados:
@@ -175,6 +214,11 @@ Com o perfil `glpi` ativo:
 Com o perfil `zabbix` ativo:
 
 - Zabbix: `http://127.0.0.1:8089`
+
+Com o perfil `ops` ativo:
+
+- PostgreSQL: `127.0.0.1:5433`
+- Redis: `127.0.0.1:6380`
 
 ## Credenciais iniciais
 

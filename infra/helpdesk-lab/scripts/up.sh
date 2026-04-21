@@ -7,16 +7,16 @@ LAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROFILE="${1:-full}"
 
 case "$PROFILE" in
-    glpi|zabbix|full|all)
+    glpi|zabbix|ops|full|all)
         ;;
     *)
-        echo "Uso: ./scripts/up.sh [glpi|zabbix|full]" >&2
+        echo "Uso: ./scripts/up.sh [glpi|zabbix|ops|full]" >&2
         exit 1
         ;;
 esac
 
 "$SCRIPT_DIR/prepare.sh"
-"$SCRIPT_DIR/preflight.sh"
+"$SCRIPT_DIR/preflight.sh" "$PROFILE"
 
 cd "$LAB_DIR"
 docker compose --profile "$PROFILE" up -d

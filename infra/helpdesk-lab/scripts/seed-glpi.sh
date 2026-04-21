@@ -84,6 +84,11 @@ find_ticket_id_by_name() {
     db_query "SELECT id FROM glpi_tickets WHERE name = $(sql_quote "$name") AND is_deleted = 0 ORDER BY id DESC LIMIT 1;"
 }
 
+find_category_id_by_name() {
+    local name="$1"
+    db_query "SELECT id FROM glpi_itilcategories WHERE name = $(sql_quote "$name") LIMIT 1;"
+}
+
 ensure_named_existing_user() {
     local user_id="$1"
     local firstname="$2"
@@ -200,6 +205,44 @@ ensure_asset() {
     printf '%s\n' "$item_id"
 }
 
+ensure_itil_category() {
+    local name="$1"
+    local code="$2"
+    local category_id
+
+    category_id="$(find_category_id_by_name "$name")"
+    if [[ -n "$category_id" ]]; then
+        local payload
+        payload="$(
+            jq -n \
+                --argjson id "$category_id" \
+                --arg name "$name" \
+                --arg code "$code" \
+                '{input:{id:$id, name:$name, code:$code, is_helpdeskvisible:1, is_incident:1, is_request:1}}'
+        )"
+        glpi_api PUT "/ITILCategory/${category_id}" "$payload" >/dev/null
+        printf '%s\n' "$category_id"
+        return 0
+    fi
+
+    local payload response
+    payload="$(
+        jq -n \
+            --arg name "$name" \
+            --arg code "$code" \
+            '{input:{name:$name, code:$code, is_helpdeskvisible:1, is_incident:1, is_request:1}}'
+    )"
+    response="$(glpi_api POST '/ITILCategory/' "$payload")"
+    category_id="$(printf '%s' "$response" | jq -r '.id // empty')"
+    if [[ -z "$category_id" ]]; then
+        echo "Falha ao criar categoria ${name} no GLPI." >&2
+        printf '%s\n' "$response" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$category_id"
+}
+
 ensure_ticket() {
     local external_id="$1"
     local title="$2"
@@ -208,7 +251,8 @@ ensure_ticket() {
     local assignee_id="$5"
     local status="$6"
     local priority="$7"
-    local legacy_title="${8:-}"
+    local category_id="${8:-0}"
+    local legacy_title="${9:-}"
     local ticket_id
 
     ticket_id="$(
@@ -229,8 +273,9 @@ ensure_ticket() {
                 --arg content "$description" \
                 --arg externalid "$external_id" \
                 --argjson priority "$priority" \
+                --argjson category_id "$category_id" \
                 --argjson requester_id "$requester_id" \
-                '{input:{name:$name, content:$content, externalid:$externalid, priority:$priority, _users_id_requester:$requester_id}}'
+                '{input:{name:$name, content:$content, externalid:$externalid, priority:$priority, itilcategories_id:$category_id, _users_id_requester:$requester_id}}'
         )"
         create_response="$(glpi_api POST '/Ticket/' "$create_payload")"
         ticket_id="$(printf '%s' "$create_response" | jq -r '.id // empty')"
@@ -250,9 +295,10 @@ ensure_ticket() {
             --arg externalid "$external_id" \
             --argjson status "$status" \
             --argjson priority "$priority" \
+            --argjson category_id "$category_id" \
             --argjson requester_id "$requester_id" \
             --argjson assignee_id "$assignee_id" \
-            '{input:{id:$id, name:$name, content:$content, externalid:$externalid, status:$status, priority:$priority, _users_id_requester:$requester_id, _users_id_assign:$assignee_id}}'
+            '{input:{id:$id, name:$name, content:$content, externalid:$externalid, status:$status, priority:$priority, itilcategories_id:$category_id, _users_id_requester:$requester_id, _users_id_assign:$assignee_id}}'
     )"
     glpi_api PUT "/Ticket/${ticket_id}" "$update_payload" >/dev/null
 
@@ -330,8 +376,8 @@ write_identity_file() {
 {
   "users": [
     {
-    "phone_number": "+5521997775269",
-      "external_id": "user-maria-santos",
+            "phone_number": "+5521997775269",
+            "external_id": "user-maria-santos",
       "display_name": "Maria Santos",
       "role": "user",
       "team": "financeiro",
@@ -342,7 +388,7 @@ write_identity_file() {
       "phone_number": "+5511977776666",
       "external_id": "user-carlos-lima",
       "display_name": "Carlos Lima",
-      "role": "user",
+            "role": "user",
       "team": "recepcao",
       "glpi_user_id": ${carlos_id},
       "active": true
@@ -353,18 +399,18 @@ write_identity_file() {
       "display_name": "Ana Souza",
       "role": "technician",
       "team": "infraestrutura",
-      "glpi_user_id": ${ana_id},
+            "glpi_user_id": ${ana_id},
       "active": true
     },
     {
-        "phone_number": "+5521972008679",
+            "phone_number": "+5521972008679",
       "external_id": "supervisor-paula-almeida",
       "display_name": "Paula Almeida",
       "role": "supervisor",
       "team": "service-desk",
       "glpi_user_id": ${paula_id},
       "active": true
-    },
+        },
     {
       "phone_number": "+5511966665555",
       "external_id": "user-bruno-costa",
@@ -375,7 +421,7 @@ write_identity_file() {
       "active": true
     },
     {
-      "phone_number": "+5511944443333",
+            "phone_number": "+5511944443333",
       "external_id": "user-renata-melo",
       "display_name": "Renata Melo",
       "role": "user",
@@ -444,6 +490,13 @@ VPN_EDGE_ID="$(ensure_asset "NetworkEquipment" "glpi_networkequipments" "vpn-edg
 ROUTER_EDGE_ID="$(ensure_asset "NetworkEquipment" "glpi_networkequipments" "router-edge-02" "LAB-ROUTER-02" "Roteador de borda secundario.")"
 PRINTER_ID="$(ensure_asset "Printer" "glpi_printers" "printer-matriz-01" "LAB-PRINTER-01" "Impressora principal da recepcao.")"
 
+ACCESS_CATEGORY_ID="$(ensure_itil_category "Acesso" "ACCESS")"
+IDENTITY_CATEGORY_ID="$(ensure_itil_category "Identidade" "IDENTITY")"
+PASSWORD_CATEGORY_ID="$(ensure_itil_category "Senha" "PASSWORD")"
+NETWORK_CATEGORY_ID="$(ensure_itil_category "Rede" "NETWORK")"
+SERVER_CATEGORY_ID="$(ensure_itil_category "Servidor" "SERVER")"
+INFRA_CATEGORY_ID="$(ensure_itil_category "Infra" "INFRA")"
+
 ERP_TICKET_ID="$(
     ensure_ticket \
         "lab-ticket-erp" \
@@ -453,6 +506,7 @@ ERP_TICKET_ID="$(
         4 \
         2 \
         4 \
+        "$INFRA_CATEGORY_ID" \
         "lab-probe-ticket"
 )"
 VPN_TICKET_ID="$(
@@ -463,7 +517,8 @@ VPN_TICKET_ID="$(
         "$RENATA_ID" \
         4 \
         3 \
-        3
+        3 \
+        "$NETWORK_CATEGORY_ID"
 )"
 PRINTER_TICKET_ID="$(
     ensure_ticket \
@@ -473,7 +528,8 @@ PRINTER_TICKET_ID="$(
         "$CARLOS_ID" \
         4 \
         1 \
-        3
+        3 \
+        "$INFRA_CATEGORY_ID"
 )"
 AUTH_TICKET_ID="$(
     ensure_ticket \
@@ -483,7 +539,8 @@ AUTH_TICKET_ID="$(
         "$BRUNO_ID" \
         4 \
         4 \
-        3
+        3 \
+        "$ACCESS_CATEGORY_ID"
 )"
 PRINT_TICKET_ID="$(
     ensure_ticket \
@@ -493,7 +550,8 @@ PRINT_TICKET_ID="$(
         "$PATRICIA_ID" \
         2 \
         2 \
-        4
+        4 \
+        "$SERVER_CATEGORY_ID"
 )"
 PERMISSION_TICKET_ID="$(
     ensure_ticket \
@@ -503,7 +561,8 @@ PERMISSION_TICKET_ID="$(
         "$RAFAEL_ID" \
         2 \
         5 \
-        2
+        2 \
+        "$IDENTITY_CATEGORY_ID"
 )"
 
 ensure_ticket_item_link "$ERP_TICKET_ID" "Computer" "$ERP_WEB_ID"
@@ -542,6 +601,7 @@ write_identity_file \
 echo "Seed do GLPI concluido."
 echo "Usuarios operacionais: Ana Souza (id 4), Paula Almeida (id 2)"
 echo "Usuarios finais: Maria=${MARIA_ID}, Carlos=${CARLOS_ID}, Bruno=${BRUNO_ID}, Renata=${RENATA_ID}, Luciana=${LUCIANA_ID}, Rafael=${RAFAEL_ID}, Patricia=${PATRICIA_ID}, Fabio=${FABIO_ID}"
+echo "Categorias: acesso=${ACCESS_CATEGORY_ID}, identidade=${IDENTITY_CATEGORY_ID}, senha=${PASSWORD_CATEGORY_ID}, rede=${NETWORK_CATEGORY_ID}, servidor=${SERVER_CATEGORY_ID}, infra=${INFRA_CATEGORY_ID}"
 echo "Ativos: erp-web-01=${ERP_WEB_ID}, db-prod-01=${DB_PROD_ID}, auth-01=${AUTH_ID}, print-spool-01=${PRINT_SPOOL_ID}, vpn-edge-01=${VPN_EDGE_ID}, router-edge-02=${ROUTER_EDGE_ID}, printer-matriz-01=${PRINTER_ID}"
 echo "Tickets: ERP=${ERP_TICKET_ID}, VPN=${VPN_TICKET_ID}, Printer=${PRINTER_TICKET_ID}, Auth=${AUTH_TICKET_ID}, Spool=${PRINT_TICKET_ID}, Permissao=${PERMISSION_TICKET_ID}"
 echo "Arquivo de identidades atualizado em ${IDENTITY_FILE}."

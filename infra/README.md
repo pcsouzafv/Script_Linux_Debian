@@ -14,7 +14,7 @@ Separar a implantacao da plataforma em blocos claros:
 - `glpi/`: ativos de deploy, configuracao e operacao do GLPI;
 - `zabbix/`: ativos de deploy, configuracao e operacao do Zabbix;
 - `evolution/`: apoio operacional para instancias adicionais da Evolution API ja existente no host;
-- `helpdesk-lab/`: laboratorio isolado em Docker Compose para GLPI + Zabbix sem tocar nos containers atuais do host;
+- `helpdesk-lab/`: laboratorio isolado em Docker Compose para GLPI + Zabbix, com PostgreSQL e Redis de apoio operacional, sem tocar nos containers atuais do host;
 - `backend/`: publicacao do backend FastAPI, proxy reverso, variaveis e execucao;
 - `automation-runner/`: camada de execucao segura das automacoes homologadas;
 - `observability/`: monitoracao da propria plataforma.

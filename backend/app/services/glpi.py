@@ -10,6 +10,19 @@ from app.schemas.helpdesk import TicketOpenRequest, TicketPriority
 from app.services.exceptions import IntegrationError, ResourceNotFoundError
 
 
+GLPI_REQUEST_TYPE_PHONE = 3
+GLPI_REQUEST_TYPE_DIRECT = 4
+GLPI_REQUEST_TYPE_LABELS = {
+    GLPI_REQUEST_TYPE_PHONE: "Phone",
+    GLPI_REQUEST_TYPE_DIRECT: "Direct",
+}
+GLPI_INVENTORY_SEARCH_ENDPOINTS: tuple[tuple[str, str], ...] = (
+    ("Computer", "Computer"),
+    ("NetworkEquipment", "NetworkEquipment"),
+    ("Printer", "Printer"),
+)
+
+
 @dataclass(slots=True)
 class MockTicketRecord:
     ticket_id: str
@@ -20,6 +33,14 @@ class MockTicketRecord:
     updated_at: str
     requester_glpi_user_id: int | None
     assigned_glpi_user_id: int | None = None
+    external_id: str | None = None
+    request_type_id: int | None = None
+    request_type_name: str | None = None
+    category_id: int | None = None
+    category_name: str | None = None
+    linked_item_type: str | None = None
+    linked_item_id: int | None = None
+    linked_item_name: str | None = None
     followups: list[dict[str, object]] = field(default_factory=list)
 
 
@@ -32,6 +53,27 @@ class GLPITicketResult:
     status: str
     mode: str
     notes: list[str]
+    external_id: str | None = None
+    request_type_id: int | None = None
+    request_type_name: str | None = None
+    category_id: int | None = None
+    category_name: str | None = None
+    linked_item_type: str | None = None
+    linked_item_id: int | None = None
+    linked_item_name: str | None = None
+
+
+@dataclass(slots=True)
+class GLPIResolvedCategory:
+    category_id: int
+    name: str
+
+
+@dataclass(slots=True)
+class GLPIResolvedInventoryItem:
+    item_type: str
+    item_id: int
+    name: str
 
 
 @dataclass(slots=True)
@@ -44,6 +86,25 @@ class GLPITicketDetails:
     requester_glpi_user_id: int | None
     assigned_glpi_user_id: int | None
     followup_count: int
+    mode: str
+    notes: list[str]
+
+
+@dataclass(slots=True)
+class GLPITicketAnalyticsDetails:
+    ticket_id: str
+    subject: str
+    description: str | None
+    status: str
+    priority: str | None
+    updated_at: str | None
+    requester_glpi_user_id: int | None
+    assigned_glpi_user_id: int | None
+    external_id: str | None
+    request_type_id: int | None
+    request_type_name: str | None
+    category_id: int | None
+    category_name: str | None
     mode: str
     notes: list[str]
 
@@ -71,12 +132,18 @@ class GLPIUserRecord:
 class GLPIClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._category_cache: dict[int, GLPIResolvedCategory | None] = {}
 
     @property
     def configured(self) -> bool:
         return bool(self.settings.glpi_base_url and self._has_supported_auth())
 
     async def create_ticket(self, ticket: TicketOpenRequest) -> GLPITicketResult:
+        source_slug, request_type_id, request_type_name = self._resolve_ticket_source(
+            ticket.subject
+        )
+        external_id = self._generate_external_id(source_slug)
+
         if not self.configured:
             ticket_id = self._generate_mock_ticket_id()
             MOCK_TICKET_STORE[ticket_id] = MockTicketRecord(
@@ -88,6 +155,10 @@ class GLPIClient:
                 updated_at=self._timestamp(),
                 requester_glpi_user_id=ticket.requester.glpi_user_id,
                 assigned_glpi_user_id=None,
+                external_id=external_id,
+                request_type_id=request_type_id,
+                request_type_name=request_type_name,
+                category_name=ticket.category,
                 followups=[],
             )
             notes = ["GLPI não configurado; ticket criado em modo mock."]
@@ -95,25 +166,79 @@ class GLPIClient:
                 notes.append(
                     f"Solicitante vinculado localmente ao usuário GLPI {ticket.requester.glpi_user_id}."
                 )
+            notes.append(
+                f"Metadados analíticos preparados no backend: externalid={external_id}, origem={request_type_name}."
+            )
             return GLPITicketResult(
                 ticket_id=ticket_id,
                 status="queued-local",
                 mode="mock",
                 notes=notes,
+                external_id=external_id,
+                request_type_id=request_type_id,
+                request_type_name=request_type_name,
+                category_name=ticket.category,
             )
 
         session_token = await self._open_session()
         try:
             headers = self._session_headers(session_token, with_json_content_type=True)
+            notes: list[str] = []
+            resolved_category: GLPIResolvedCategory | None = None
+            resolved_inventory_item: GLPIResolvedInventoryItem | None = None
+
+            if ticket.category:
+                try:
+                    resolved_category = await self._find_itil_category_by_name(
+                        ticket.category,
+                        session_token=session_token,
+                    )
+                    if resolved_category is None:
+                        notes.append(
+                            f"Categoria {ticket.category} não encontrada no GLPI; ticket criado sem itilcategories_id."
+                        )
+                    else:
+                        notes.append(
+                            f"Categoria analítica vinculada ao GLPI: {resolved_category.name} ({resolved_category.category_id})."
+                        )
+                except IntegrationError as exc:
+                    notes.append(
+                        f"Falha ao resolver categoria analítica no GLPI: {exc}"
+                    )
+
+            if ticket.asset_name:
+                try:
+                    resolved_inventory_item = await self._find_inventory_item_by_name(
+                        ticket.asset_name,
+                        session_token=session_token,
+                    )
+                    if resolved_inventory_item is None:
+                        notes.append(
+                            f"Ativo {ticket.asset_name} não encontrado ou ambíguo no inventário do GLPI; ticket criado sem Item_Ticket."
+                        )
+                    else:
+                        notes.append(
+                            "Ativo relacionado identificado no inventário do GLPI: "
+                            f"{resolved_inventory_item.name} ({resolved_inventory_item.item_type} {resolved_inventory_item.item_id})."
+                        )
+                except IntegrationError as exc:
+                    notes.append(
+                        f"Falha ao resolver ativo relacionado no GLPI: {exc}"
+                    )
+
             payload = {
                 "input": {
                     "name": ticket.subject,
                     "content": ticket.description,
                     "priority": self._map_priority(ticket.priority),
+                    "externalid": external_id,
+                    "requesttypes_id": request_type_id,
                 }
             }
             if ticket.requester.glpi_user_id:
                 payload["input"]["_users_id_requester"] = ticket.requester.glpi_user_id
+            if resolved_category is not None:
+                payload["input"]["itilcategories_id"] = resolved_category.category_id
 
             try:
                 async with httpx.AsyncClient(timeout=20.0) as client:
@@ -131,17 +256,46 @@ class GLPIClient:
             if not ticket_id:
                 raise IntegrationError("GLPI não retornou um identificador de ticket.")
 
-            notes = ["Ticket criado com sucesso no GLPI."]
+            notes.insert(0, "Ticket criado com sucesso no GLPI.")
             if ticket.requester.glpi_user_id:
                 notes.append(
                     f"Solicitante vinculado ao usuário GLPI {ticket.requester.glpi_user_id}."
                 )
+            notes.append(
+                f"Origem analítica persistida no GLPI como requesttypes_id={request_type_id} ({request_type_name})."
+            )
+            notes.append(f"externalid persistido no GLPI: {external_id}.")
+
+            if resolved_inventory_item is not None:
+                try:
+                    await self._link_ticket_to_item(
+                        ticket_id=ticket_id,
+                        item_type=resolved_inventory_item.item_type,
+                        item_id=resolved_inventory_item.item_id,
+                        session_token=session_token,
+                    )
+                    notes.append(
+                        "Vínculo Item_Ticket criado no GLPI para "
+                        f"{resolved_inventory_item.name} ({resolved_inventory_item.item_type} {resolved_inventory_item.item_id})."
+                    )
+                except IntegrationError as exc:
+                    notes.append(
+                        f"Ticket criado, mas falhou ao criar Item_Ticket no GLPI: {exc}"
+                    )
 
             return GLPITicketResult(
                 ticket_id=ticket_id,
                 status="created",
                 mode="live",
                 notes=notes,
+                external_id=external_id,
+                request_type_id=request_type_id,
+                request_type_name=request_type_name,
+                category_id=(resolved_category.category_id if resolved_category else None),
+                category_name=(resolved_category.name if resolved_category else ticket.category),
+                linked_item_type=(resolved_inventory_item.item_type if resolved_inventory_item else None),
+                linked_item_id=(resolved_inventory_item.item_id if resolved_inventory_item else None),
+                linked_item_name=(resolved_inventory_item.name if resolved_inventory_item else None),
             )
         finally:
             await self._close_session(session_token)
@@ -365,6 +519,346 @@ class GLPIClient:
         finally:
             await self._close_session(session_token)
 
+    async def list_ticket_ids(self, *, limit: int = 20, offset: int = 0) -> list[str]:
+        if limit <= 0 or offset < 0:
+            return []
+
+        if not self.configured:
+            tickets = sorted(
+                MOCK_TICKET_STORE.values(),
+                key=lambda item: item.updated_at,
+                reverse=True,
+            )
+            return [ticket.ticket_id for ticket in tickets[offset : offset + limit]]
+
+        session_token = await self._open_session()
+        try:
+            headers = self._session_headers(session_token, with_json_content_type=True)
+            params: list[tuple[str, str]] = [
+                ("forcedisplay[0]", "2"),
+                ("forcedisplay[1]", "1"),
+                ("forcedisplay[2]", "19"),
+                ("sort", "19"),
+                ("order", "DESC"),
+                ("range", f"{offset}-{offset + limit - 1}"),
+            ]
+
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    response = await client.get(
+                        f"{self._base_url()}/search/Ticket",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+            except httpx.HTTPError as exc:
+                raise IntegrationError(f"Falha ao listar tickets no GLPI: {exc}") from exc
+
+            rows = data.get("data") or []
+            if isinstance(rows, dict):
+                rows = list(rows.values())
+
+            ticket_ids: list[str] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                ticket_id = row.get("2") or row.get("id")
+                if ticket_id in (None, ""):
+                    continue
+                ticket_ids.append(str(ticket_id))
+            return ticket_ids
+        finally:
+            await self._close_session(session_token)
+
+    async def get_ticket_analytics_details(self, ticket_id: str) -> GLPITicketAnalyticsDetails:
+        if not self.configured:
+            mock_ticket = self._get_mock_ticket(ticket_id)
+            return GLPITicketAnalyticsDetails(
+                ticket_id=mock_ticket.ticket_id,
+                subject=mock_ticket.subject,
+                description=mock_ticket.description,
+                status=mock_ticket.status,
+                priority=mock_ticket.priority,
+                updated_at=mock_ticket.updated_at,
+                requester_glpi_user_id=mock_ticket.requester_glpi_user_id,
+                assigned_glpi_user_id=mock_ticket.assigned_glpi_user_id,
+                external_id=mock_ticket.external_id,
+                request_type_id=mock_ticket.request_type_id,
+                request_type_name=mock_ticket.request_type_name,
+                category_id=mock_ticket.category_id,
+                category_name=mock_ticket.category_name,
+                mode="mock",
+                notes=["Detalhes analíticos consultados no armazenamento mock local."],
+            )
+
+        session_token = await self._open_session()
+        try:
+            headers = self._session_headers(session_token, with_json_content_type=True)
+
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    response = await client.get(
+                        f"{self._base_url()}/Ticket/{ticket_id}",
+                        headers=headers,
+                    )
+            except httpx.HTTPError as exc:
+                raise IntegrationError(
+                    f"Falha ao consultar detalhes analíticos do ticket no GLPI: {exc}"
+                ) from exc
+
+            if response.status_code == 404:
+                raise ResourceNotFoundError(f"Ticket {ticket_id} não encontrado no GLPI.")
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise IntegrationError(
+                    f"Falha ao consultar detalhes analíticos do ticket no GLPI: {exc}"
+                ) from exc
+
+            data = response.json()
+            requester_glpi_user_id = self._extract_actor_id(data.get("_users_id_requester"))
+            assigned_glpi_user_id = self._extract_actor_id(data.get("_users_id_assign"))
+            if requester_glpi_user_id is None or assigned_glpi_user_id is None:
+                linked_requester_id, linked_assignee_id = await self._load_ticket_user_actor_ids(
+                    ticket_id=str(data.get("id") or ticket_id),
+                    session_token=session_token,
+                )
+                if requester_glpi_user_id is None:
+                    requester_glpi_user_id = linked_requester_id
+                if assigned_glpi_user_id is None:
+                    assigned_glpi_user_id = linked_assignee_id
+
+            request_type_id = self._normalize_int(data.get("requesttypes_id"))
+            category_id = self._normalize_int(data.get("itilcategories_id"))
+            request_type_name = (
+                GLPI_REQUEST_TYPE_LABELS.get(request_type_id)
+                if request_type_id is not None
+                else None
+            )
+            notes = ["Detalhes analíticos do ticket consultados com sucesso no GLPI."]
+            category_name = self._normalize_optional_text(data.get("_itilcategories_id"))
+            if category_name is None and category_id is not None:
+                try:
+                    resolved_category = await self._get_itil_category_by_id(
+                        category_id,
+                        session_token=session_token,
+                    )
+                except IntegrationError as exc:
+                    resolved_category = None
+                    notes.append(
+                        f"Falha ao resolver nome da categoria analítica no GLPI: {exc}"
+                    )
+                if resolved_category is not None:
+                    category_name = resolved_category.name
+
+            return GLPITicketAnalyticsDetails(
+                ticket_id=str(data.get("id") or ticket_id),
+                subject=data.get("name") or f"Ticket {ticket_id}",
+                description=self._normalize_optional_text(data.get("content")),
+                status=self._normalize_status(data.get("status")),
+                priority=self._normalize_priority(data.get("priority")),
+                updated_at=data.get("date_mod") or data.get("date") or data.get("solvedate"),
+                requester_glpi_user_id=requester_glpi_user_id,
+                assigned_glpi_user_id=assigned_glpi_user_id,
+                external_id=self._normalize_optional_text(data.get("externalid")),
+                request_type_id=request_type_id,
+                request_type_name=request_type_name,
+                category_id=category_id,
+                category_name=category_name,
+                mode="live",
+                notes=notes,
+            )
+        finally:
+            await self._close_session(session_token)
+
+    async def resolve_category_by_name(self, category_name: str) -> GLPIResolvedCategory | None:
+        if not self.configured:
+            normalized_category_name = self._normalize_optional_text(category_name)
+            if not normalized_category_name:
+                return None
+            return GLPIResolvedCategory(category_id=0, name=normalized_category_name)
+
+        session_token = await self._open_session()
+        try:
+            return await self._find_itil_category_by_name(
+                category_name,
+                session_token=session_token,
+            )
+        finally:
+            await self._close_session(session_token)
+
+    async def resolve_inventory_item_by_name(
+        self,
+        asset_name: str,
+    ) -> GLPIResolvedInventoryItem | None:
+        if not self.configured:
+            return None
+
+        session_token = await self._open_session()
+        try:
+            return await self._find_inventory_item_by_name(
+                asset_name,
+                session_token=session_token,
+            )
+        finally:
+            await self._close_session(session_token)
+
+    async def apply_ticket_analytics_patch(
+        self,
+        ticket_id: str,
+        *,
+        external_id: str | None = None,
+        request_type_id: int | None = None,
+        category_id: int | None = None,
+        category_name: str | None = None,
+        linked_item: GLPIResolvedInventoryItem | None = None,
+    ) -> GLPITicketResult:
+        if not self.configured:
+            mock_ticket = self._get_mock_ticket(ticket_id)
+            notes: list[str] = []
+            if external_id:
+                mock_ticket.external_id = external_id
+                notes.append(f"externalid atualizado localmente para {external_id}.")
+            if request_type_id is not None:
+                mock_ticket.request_type_id = request_type_id
+                mock_ticket.request_type_name = GLPI_REQUEST_TYPE_LABELS.get(request_type_id)
+                notes.append(
+                    "requesttypes_id atualizado localmente para "
+                    f"{request_type_id} ({mock_ticket.request_type_name or 'desconhecido'})."
+                )
+            if category_id is not None:
+                mock_ticket.category_id = category_id
+                mock_ticket.category_name = category_name or mock_ticket.category_name
+                notes.append(
+                    "itilcategories_id atualizado localmente para "
+                    f"{category_id} ({mock_ticket.category_name or 'sem nome'})."
+                )
+            if linked_item is not None:
+                mock_ticket.linked_item_type = linked_item.item_type
+                mock_ticket.linked_item_id = linked_item.item_id
+                mock_ticket.linked_item_name = linked_item.name
+                notes.append(
+                    "Item_Ticket preparado localmente para "
+                    f"{linked_item.name} ({linked_item.item_type} {linked_item.item_id})."
+                )
+            if not notes:
+                notes.append("Nenhum campo analítico precisou ser atualizado em modo mock.")
+            mock_ticket.updated_at = self._timestamp()
+            return GLPITicketResult(
+                ticket_id=ticket_id,
+                status="updated-local" if notes else "noop-local",
+                mode="mock",
+                notes=notes,
+                external_id=mock_ticket.external_id,
+                request_type_id=mock_ticket.request_type_id,
+                request_type_name=mock_ticket.request_type_name,
+                category_id=mock_ticket.category_id,
+                category_name=mock_ticket.category_name,
+                linked_item_type=mock_ticket.linked_item_type,
+                linked_item_id=mock_ticket.linked_item_id,
+                linked_item_name=mock_ticket.linked_item_name,
+            )
+
+        fields: dict[str, object] = {}
+        notes: list[str] = []
+        if external_id:
+            fields["externalid"] = external_id
+            notes.append(f"externalid preparado para atualização: {external_id}.")
+        if request_type_id is not None:
+            fields["requesttypes_id"] = request_type_id
+            notes.append(
+                "requesttypes_id preparado para atualização: "
+                f"{request_type_id} ({GLPI_REQUEST_TYPE_LABELS.get(request_type_id, 'desconhecido')})."
+            )
+        if category_id is not None:
+            fields["itilcategories_id"] = category_id
+            notes.append(
+                "itilcategories_id preparado para atualização: "
+                f"{category_id} ({category_name or 'sem nome'})."
+            )
+
+        if not fields and linked_item is None:
+            return GLPITicketResult(
+                ticket_id=ticket_id,
+                status="noop",
+                mode="live",
+                notes=["Nenhum campo analítico precisou ser atualizado no GLPI."],
+            )
+
+        session_token = await self._open_session()
+        try:
+            headers = self._session_headers(session_token, with_json_content_type=True)
+            if fields:
+                payload = {
+                    "input": {
+                        "id": self._coerce_live_id(ticket_id),
+                        **fields,
+                    }
+                }
+
+                try:
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        response = await client.put(
+                            f"{self._base_url()}/Ticket/{ticket_id}",
+                            headers=headers,
+                            json=payload,
+                        )
+                except httpx.HTTPError as exc:
+                    raise IntegrationError(
+                        f"Falha ao atualizar campos analíticos do ticket no GLPI: {exc}"
+                    ) from exc
+
+                if response.status_code == 404:
+                    raise ResourceNotFoundError(f"Ticket {ticket_id} não encontrado no GLPI.")
+
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPError as exc:
+                    raise IntegrationError(
+                        f"Falha ao atualizar campos analíticos do ticket no GLPI: {exc}"
+                    ) from exc
+
+            if linked_item is not None:
+                try:
+                    await self._link_ticket_to_item(
+                        ticket_id=ticket_id,
+                        item_type=linked_item.item_type,
+                        item_id=linked_item.item_id,
+                        session_token=session_token,
+                    )
+                    notes.append(
+                        "Item_Ticket criado durante o backfill para "
+                        f"{linked_item.name} ({linked_item.item_type} {linked_item.item_id})."
+                    )
+                except IntegrationError as exc:
+                    notes.append(
+                        f"Falha ao criar Item_Ticket durante o backfill: {exc}"
+                    )
+        finally:
+            await self._close_session(session_token)
+
+        if not notes:
+            notes.append("Campos analíticos atualizados com sucesso no GLPI.")
+        else:
+            notes.insert(0, "Campos analíticos atualizados com sucesso no GLPI.")
+
+        return GLPITicketResult(
+            ticket_id=ticket_id,
+            status="updated",
+            mode="live",
+            notes=notes,
+            external_id=external_id,
+            request_type_id=request_type_id,
+            request_type_name=GLPI_REQUEST_TYPE_LABELS.get(request_type_id),
+            category_id=category_id,
+            category_name=category_name,
+            linked_item_type=(linked_item.item_type if linked_item else None),
+            linked_item_id=(linked_item.item_id if linked_item else None),
+            linked_item_name=(linked_item.name if linked_item else None),
+        )
+
     async def add_ticket_followup(
         self,
         ticket_id: str,
@@ -584,6 +1078,30 @@ class GLPIClient:
     def _generate_mock_ticket_id(self) -> str:
         return f"GLPI-LOCAL-{uuid4().hex[:12].upper()}"
 
+    def _generate_external_id(self, source_slug: str) -> str:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return f"helpdesk-{source_slug}-{timestamp}-{uuid4().hex[:8]}"
+
+    def _resolve_ticket_source(self, subject: str) -> tuple[str, int, str]:
+        normalized_subject = subject.strip().lower()
+        if normalized_subject.startswith("operacional whatsapp:"):
+            return (
+                "whatsapp-operator",
+                GLPI_REQUEST_TYPE_PHONE,
+                GLPI_REQUEST_TYPE_LABELS[GLPI_REQUEST_TYPE_PHONE],
+            )
+        if normalized_subject.startswith("whatsapp:"):
+            return (
+                "whatsapp",
+                GLPI_REQUEST_TYPE_PHONE,
+                GLPI_REQUEST_TYPE_LABELS[GLPI_REQUEST_TYPE_PHONE],
+            )
+        return (
+            "api",
+            GLPI_REQUEST_TYPE_DIRECT,
+            GLPI_REQUEST_TYPE_LABELS[GLPI_REQUEST_TYPE_DIRECT],
+        )
+
     async def _update_ticket_fields(
         self,
         ticket_id: str,
@@ -622,6 +1140,175 @@ class GLPIClient:
 
         ticket = await self.get_ticket(ticket_id)
         return GLPITicketMutationResult(ticket=ticket, mode="live", notes=[success_note])
+
+    async def _find_itil_category_by_name(
+        self,
+        category_name: str,
+        *,
+        session_token: str,
+    ) -> GLPIResolvedCategory | None:
+        rows = await self._search_named_resource(
+            "ITILCategory",
+            category_name,
+            session_token=session_token,
+            forcedisplay=(2, 1, 3),
+            range_="0-9",
+        )
+
+        normalized_category_name = category_name.strip().casefold()
+        exact_matches: list[GLPIResolvedCategory] = []
+        fallback_matches: list[GLPIResolvedCategory] = []
+        for row in rows:
+            category = self._parse_category_row(row)
+            if category is None:
+                continue
+            fallback_matches.append(category)
+            if category.name.casefold() == normalized_category_name:
+                exact_matches.append(category)
+
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if not exact_matches and len(fallback_matches) == 1:
+            return fallback_matches[0]
+        return None
+
+    async def _get_itil_category_by_id(
+        self,
+        category_id: int,
+        *,
+        session_token: str,
+    ) -> GLPIResolvedCategory | None:
+        if category_id in self._category_cache:
+            return self._category_cache[category_id]
+
+        headers = self._session_headers(session_token, with_json_content_type=True)
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.get(
+                    f"{self._base_url()}/ITILCategory/{category_id}",
+                    headers=headers,
+                )
+        except httpx.HTTPError as exc:
+            raise IntegrationError(f"Falha ao consultar categoria analítica no GLPI: {exc}") from exc
+
+        if response.status_code == 404:
+            self._category_cache[category_id] = None
+            return None
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise IntegrationError(f"Falha ao consultar categoria analítica no GLPI: {exc}") from exc
+
+        data = response.json()
+        normalized_name = self._normalize_optional_text(
+            data.get("completename") or data.get("name")
+        )
+        if normalized_name is None:
+            self._category_cache[category_id] = None
+            return None
+
+        resolved = GLPIResolvedCategory(category_id=category_id, name=normalized_name)
+        self._category_cache[category_id] = resolved
+        return resolved
+
+    async def _find_inventory_item_by_name(
+        self,
+        asset_name: str,
+        *,
+        session_token: str,
+    ) -> GLPIResolvedInventoryItem | None:
+        normalized_asset_name = asset_name.strip().casefold()
+        exact_matches: list[GLPIResolvedInventoryItem] = []
+        fallback_matches: list[GLPIResolvedInventoryItem] = []
+
+        for endpoint_name, item_type in GLPI_INVENTORY_SEARCH_ENDPOINTS:
+            rows = await self._search_named_resource(
+                endpoint_name,
+                asset_name,
+                session_token=session_token,
+                forcedisplay=(2, 1),
+                range_="0-9",
+            )
+            for row in rows:
+                inventory_item = self._parse_inventory_row(row, item_type=item_type)
+                if inventory_item is None:
+                    continue
+                fallback_matches.append(inventory_item)
+                if inventory_item.name.casefold() == normalized_asset_name:
+                    exact_matches.append(inventory_item)
+
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if not exact_matches and len(fallback_matches) == 1:
+            return fallback_matches[0]
+        return None
+
+    async def _search_named_resource(
+        self,
+        resource_name: str,
+        search_value: str,
+        *,
+        session_token: str,
+        forcedisplay: tuple[int, ...],
+        range_: str,
+    ) -> list[dict[str, object]]:
+        headers = self._session_headers(session_token, with_json_content_type=True)
+        params: list[tuple[str, str]] = [
+            ("criteria[0][field]", "1"),
+            ("criteria[0][searchtype]", "contains"),
+            ("criteria[0][value]", search_value),
+        ]
+        for index, field_id in enumerate(forcedisplay):
+            params.append((f"forcedisplay[{index}]", str(field_id)))
+        params.append(("range", range_))
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.get(
+                    f"{self._base_url()}/search/{resource_name}",
+                    headers=headers,
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            raise IntegrationError(
+                f"Falha ao pesquisar {resource_name} no GLPI: {exc}"
+            ) from exc
+
+        rows = data.get("data") or []
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        return [row for row in rows if isinstance(row, dict)]
+
+    async def _link_ticket_to_item(
+        self,
+        *,
+        ticket_id: str,
+        item_type: str,
+        item_id: int,
+        session_token: str,
+    ) -> None:
+        headers = self._session_headers(session_token, with_json_content_type=True)
+        payload = {
+            "input": {
+                "itemtype": item_type,
+                "items_id": item_id,
+                "tickets_id": self._coerce_live_id(ticket_id),
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.post(
+                    f"{self._base_url()}/Item_Ticket/",
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise IntegrationError(f"Falha ao criar vínculo Item_Ticket no GLPI: {exc}") from exc
 
     async def _load_ticket_user_actor_ids(
         self,
@@ -815,6 +1502,29 @@ class GLPIClient:
                 return len(field_value)
         return 0
 
+    def _parse_category_row(self, row: dict[str, object]) -> GLPIResolvedCategory | None:
+        category_id = row.get("2") or row.get("id")
+        category_name = self._normalize_optional_text(row.get("1") or row.get("3"))
+        if category_id in (None, "") or not category_name:
+            return None
+        return GLPIResolvedCategory(category_id=int(category_id), name=category_name)
+
+    def _parse_inventory_row(
+        self,
+        row: dict[str, object],
+        *,
+        item_type: str,
+    ) -> GLPIResolvedInventoryItem | None:
+        item_id = row.get("2") or row.get("id")
+        item_name = self._normalize_optional_text(row.get("1"))
+        if item_id in (None, "") or not item_name:
+            return None
+        return GLPIResolvedInventoryItem(
+            item_type=item_type,
+            item_id=int(item_id),
+            name=item_name,
+        )
+
     def _extract_ticket_user_actor_ids(self, data: object) -> tuple[int | None, int | None]:
         requester_glpi_user_id: int | None = None
         assigned_glpi_user_id: int | None = None
@@ -865,6 +1575,16 @@ class GLPIClient:
         if not normalized:
             return []
         return [normalized]
+
+    def _normalize_int(self, value: object) -> int | None:
+        if isinstance(value, int):
+            return value if value > 0 else None
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized.isdigit():
+                parsed = int(normalized)
+                return parsed if parsed > 0 else None
+        return None
 
     def _normalize_phone(self, phone_number: object) -> str:
         return "".join(character for character in str(phone_number or "") if character.isdigit())

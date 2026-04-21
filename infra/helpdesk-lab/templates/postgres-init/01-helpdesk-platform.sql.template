@@ -1,0 +1,75 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE SCHEMA IF NOT EXISTS ${OPS_POSTGRES_SCHEMA};
+
+CREATE TABLE IF NOT EXISTS ${OPS_POSTGRES_SCHEMA}.audit_event (
+    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    event_type TEXT NOT NULL,
+    actor_external_id TEXT,
+    actor_role TEXT,
+    ticket_id TEXT,
+    source_channel TEXT,
+    status TEXT,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_event_created_at
+    ON ${OPS_POSTGRES_SCHEMA}.audit_event (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ${OPS_POSTGRES_SCHEMA}.session_state (
+    session_key TEXT PRIMARY KEY,
+    flow_name TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    requester_display_name TEXT,
+    state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS ${OPS_POSTGRES_SCHEMA}.job_request (
+    job_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    requested_by TEXT,
+    ticket_id TEXT,
+    automation_name TEXT NOT NULL,
+    approval_status TEXT NOT NULL DEFAULT 'pending',
+    execution_status TEXT NOT NULL DEFAULT 'queued',
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_request_created_at
+    ON ${OPS_POSTGRES_SCHEMA}.job_request (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_job_request_status
+    ON ${OPS_POSTGRES_SCHEMA}.job_request (approval_status, execution_status);
+
+CREATE TABLE IF NOT EXISTS ${OPS_POSTGRES_SCHEMA}.ticket_analytics_snapshot (
+    ticket_id TEXT PRIMARY KEY,
+    subject TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL,
+    priority TEXT,
+    requester_glpi_user_id INTEGER,
+    assigned_glpi_user_id INTEGER,
+    external_id TEXT,
+    request_type_id INTEGER,
+    request_type_name TEXT,
+    category_id INTEGER,
+    category_name TEXT,
+    asset_name TEXT,
+    service_name TEXT,
+    source_channel TEXT,
+    routed_to TEXT,
+    correlation_event_count INTEGER NOT NULL DEFAULT 0,
+    source_updated_at TIMESTAMPTZ,
+    source_audit_created_at TIMESTAMPTZ,
+    snapshot_created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    snapshot_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    attributes_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_ticket_analytics_snapshot_category_status
+    ON ${OPS_POSTGRES_SCHEMA}.ticket_analytics_snapshot (category_name, status);
+
+CREATE INDEX IF NOT EXISTS idx_ticket_analytics_snapshot_source_updated_at
+    ON ${OPS_POSTGRES_SCHEMA}.ticket_analytics_snapshot (source_updated_at DESC NULLS LAST);

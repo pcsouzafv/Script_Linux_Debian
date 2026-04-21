@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$LAB_DIR/.env"
+PROFILE="${1:-full}"
 
 trim_whitespace() {
     local value="$1"
@@ -61,9 +62,46 @@ check_port_free() {
     return 0
 }
 
-check_port_free "${GLPI_HOST_PORT}" || exit 1
-check_port_free "${ZABBIX_WEB_HOST_PORT}" || exit 1
+case "$PROFILE" in
+    glpi)
+        check_port_free "${GLPI_HOST_PORT}" || exit 1
+        ;;
+    zabbix)
+        check_port_free "${ZABBIX_WEB_HOST_PORT}" || exit 1
+        ;;
+    ops)
+        check_port_free "${POSTGRES_HOST_PORT}" || exit 1
+        check_port_free "${REDIS_HOST_PORT}" || exit 1
+        ;;
+    full|all)
+        check_port_free "${GLPI_HOST_PORT}" || exit 1
+        check_port_free "${ZABBIX_WEB_HOST_PORT}" || exit 1
+        check_port_free "${POSTGRES_HOST_PORT}" || exit 1
+        check_port_free "${REDIS_HOST_PORT}" || exit 1
+        ;;
+    *)
+        echo "Uso: ./scripts/preflight.sh [glpi|zabbix|ops|full]" >&2
+        exit 1
+        ;;
+esac
 
 echo "Preflight OK."
-echo "GLPI usara 127.0.0.1:${GLPI_HOST_PORT}"
-echo "Zabbix usara 127.0.0.1:${ZABBIX_WEB_HOST_PORT}"
+
+case "$PROFILE" in
+    glpi)
+        echo "GLPI usara 127.0.0.1:${GLPI_HOST_PORT}"
+        ;;
+    zabbix)
+        echo "Zabbix usara 127.0.0.1:${ZABBIX_WEB_HOST_PORT}"
+        ;;
+    ops)
+        echo "PostgreSQL operacional usara 127.0.0.1:${POSTGRES_HOST_PORT}"
+        echo "Redis operacional usara 127.0.0.1:${REDIS_HOST_PORT}"
+        ;;
+    full|all)
+        echo "GLPI usara 127.0.0.1:${GLPI_HOST_PORT}"
+        echo "Zabbix usara 127.0.0.1:${ZABBIX_WEB_HOST_PORT}"
+        echo "PostgreSQL operacional usara 127.0.0.1:${POSTGRES_HOST_PORT}"
+        echo "Redis operacional usara 127.0.0.1:${REDIS_HOST_PORT}"
+        ;;
+esac

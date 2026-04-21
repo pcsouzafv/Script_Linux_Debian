@@ -1,8 +1,8 @@
 {
   "users": [
     {
-    "phone_number": "+5521997775269",
-      "external_id": "user-maria-santos",
+            "phone_number": "+5521997775269",
+            "external_id": "user-maria-santos",
       "display_name": "Maria Santos",
       "role": "user",
       "team": "financeiro",
@@ -13,7 +13,7 @@
       "phone_number": "+5511977776666",
       "external_id": "user-carlos-lima",
       "display_name": "Carlos Lima",
-      "role": "user",
+            "role": "user",
       "team": "recepcao",
       "glpi_user_id": 8,
       "active": true
@@ -24,18 +24,18 @@
       "display_name": "Ana Souza",
       "role": "technician",
       "team": "infraestrutura",
-      "glpi_user_id": 4,
+            "glpi_user_id": 4,
       "active": true
     },
     {
-        "phone_number": "+5521972008679",
+            "phone_number": "+5521972008679",
       "external_id": "supervisor-paula-almeida",
       "display_name": "Paula Almeida",
       "role": "supervisor",
       "team": "service-desk",
       "glpi_user_id": 2,
       "active": true
-    },
+        },
     {
       "phone_number": "+5511966665555",
       "external_id": "user-bruno-costa",
@@ -46,7 +46,7 @@
       "active": true
     },
     {
-      "phone_number": "+5511944443333",
+            "phone_number": "+5511944443333",
       "external_id": "user-renata-melo",
       "display_name": "Renata Melo",
       "role": "user",

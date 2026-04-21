@@ -1,6 +1,20 @@
+import re
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
+
+
+OPERATOR_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{1,119}$")
+
+
+def _validate_operator_identifier(value: str, field_name: str) -> str:
+    normalized = value.strip()
+    if not OPERATOR_IDENTIFIER_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            f"{field_name} must use 2-120 ASCII chars without spaces; allowed: letters, digits, dot, underscore, at, colon and hyphen"
+        )
+    return normalized
 
 
 class UserRole(StrEnum):
@@ -160,6 +174,109 @@ class IdentityLookupResponse(BaseModel):
     team: str | None = None
     glpi_user_id: int | None = None
     source: str
+    notes: list[str] = Field(default_factory=list)
+
+
+class AuditEventResponse(BaseModel):
+    event_id: str
+    created_at: str
+    event_type: str
+    actor_external_id: str | None = None
+    actor_role: str | None = None
+    ticket_id: str | None = None
+    source_channel: str
+    status: str
+    payload_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventListResponse(BaseModel):
+    storage_mode: str
+    retention_days: int | None = None
+    applied_filters: dict[str, str] = Field(default_factory=dict)
+    events: list[AuditEventResponse] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class AutomationJobCreateRequest(BaseModel):
+    requested_by: str = Field(..., min_length=2, max_length=120)
+    automation_name: str = Field(..., min_length=3, max_length=80)
+    ticket_id: str | None = Field(default=None, min_length=2, max_length=120)
+    reason: str | None = Field(default=None, max_length=240)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("requested_by")
+    @classmethod
+    def validate_requested_by(cls, value: str) -> str:
+        return _validate_operator_identifier(value, "requested_by")
+
+
+class AutomationJobDecisionRequest(BaseModel):
+    acted_by: str = Field(..., min_length=2, max_length=120)
+    reason_code: str = Field(
+        ...,
+        min_length=3,
+        max_length=80,
+        validation_alias=AliasChoices("reason_code", "reason"),
+    )
+
+    @field_validator("acted_by")
+    @classmethod
+    def validate_acted_by(cls, value: str) -> str:
+        return _validate_operator_identifier(value, "acted_by")
+
+
+class AutomationJobResponse(BaseModel):
+    job_id: str
+    created_at: str
+    requested_by: str | None = None
+    ticket_id: str | None = None
+    automation_name: str
+    risk_level: str | None = None
+    approval_mode: str | None = None
+    approval_required: bool = False
+    approval_status: str
+    approval_acted_by: str | None = None
+    approval_reason_code: str | None = None
+    approval_reason: str | None = None
+    approval_updated_at: str | None = None
+    execution_status: str
+    attempt_count: int = 0
+    max_attempts: int = 1
+    retry_scheduled_at: str | None = None
+    retry_delay_seconds: int | None = None
+    last_error: str | None = None
+    dead_lettered_at: str | None = None
+    cancelled_by: str | None = None
+    cancellation_reason_code: str | None = None
+    cancellation_reason: str | None = None
+    cancelled_at: str | None = None
+    queue_mode: str | None = None
+    payload_json: dict[str, Any] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
+class AutomationJobListResponse(BaseModel):
+    storage_mode: str
+    applied_filters: dict[str, str] = Field(default_factory=dict)
+    jobs: list[AutomationJobResponse] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class AutomationSummaryResponse(BaseModel):
+    storage_mode: str
+    queue_mode: str
+    approval_timeout_minutes: int | None = None
+    total_jobs: int = 0
+    approval_status_counts: dict[str, int] = Field(default_factory=dict)
+    execution_status_counts: dict[str, int] = Field(default_factory=dict)
+    queue_depth: int = 0
+    dead_letter_queue_depth: int = 0
+    oldest_job_created_at: str | None = None
+    oldest_pending_approval_started_at: str | None = None
+    oldest_pending_approval_expires_at: str | None = None
+    oldest_queued_job_created_at: str | None = None
+    oldest_running_started_at: str | None = None
+    oldest_retry_scheduled_at: str | None = None
     notes: list[str] = Field(default_factory=list)
 
 

@@ -77,6 +77,10 @@ if [[ -z "$ZABBIX_AUTH" ]]; then
     exit 1
 fi
 
+ENCODED_POSTGRES_USER="$(urlencode "$OPS_POSTGRES_USER")"
+ENCODED_POSTGRES_PASSWORD="$(urlencode "$OPS_POSTGRES_PASSWORD")"
+ENCODED_REDIS_PASSWORD="$(urlencode "$OPS_REDIS_PASSWORD")"
+
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_IDENTITY_PROVIDER" "glpi"
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_IDENTITY_STORE_PATH" "data/identities.lab.json"
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_IDENTITY_GLPI_USER_PROFILES" "Self-Service"
@@ -92,9 +96,14 @@ upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_ZABBIX_BASE_URL" "http://127.0.0.1:
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_ZABBIX_API_TOKEN" ""
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_ZABBIX_USERNAME" "Admin"
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_ZABBIX_PASSWORD" "zabbix"
+upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_OPERATIONAL_POSTGRES_DSN" "postgresql://${ENCODED_POSTGRES_USER}:${ENCODED_POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_HOST_PORT}/${OPS_POSTGRES_DB}"
+upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_OPERATIONAL_POSTGRES_SCHEMA" "$OPS_POSTGRES_SCHEMA"
+upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_REDIS_URL" "redis://:${ENCODED_REDIS_PASSWORD}@127.0.0.1:${REDIS_HOST_PORT}/0"
 
 echo "Integracoes do laboratorio bootstrapadas com sucesso."
 echo "GLPI API: http://127.0.0.1:${GLPI_HOST_PORT}/apirest.php"
 echo "Zabbix API: http://127.0.0.1:${ZABBIX_WEB_HOST_PORT}/api_jsonrpc.php"
+echo "PostgreSQL operacional: postgresql://${OPS_POSTGRES_USER}:***@127.0.0.1:${POSTGRES_HOST_PORT}/${OPS_POSTGRES_DB}"
+echo "Redis operacional: redis://:***@127.0.0.1:${REDIS_HOST_PORT}/0"
 echo "Backend .env alinhado para usar o laboratorio."
 echo "Reinicie o backend para recarregar as credenciais."

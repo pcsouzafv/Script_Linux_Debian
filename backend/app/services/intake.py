@@ -4,6 +4,11 @@ import re
 from app.schemas.helpdesk import NormalizedWhatsAppMessage, RequesterIdentity
 from app.services.exceptions import IntegrationError
 from app.services.llm import LLMClient
+from app.services.operational_store import (
+    OperationalSessionRecord,
+    OperationalStateStore,
+    clear_memory_operational_state,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,25 +163,35 @@ CONTEXT_DECISION_ACTIONS = (
     "unclear",
 )
 
-USER_INTAKE_SESSIONS: dict[str, UserIntakeSession] = {}
-
 
 def clear_user_intake_sessions() -> None:
-    USER_INTAKE_SESSIONS.clear()
+    clear_memory_operational_state()
 
 
 class UserIntakeService:
-    def __init__(self, llm_client: LLMClient | None = None) -> None:
+    def __init__(
+        self,
+        llm_client: LLMClient | None = None,
+        operational_store: OperationalStateStore | None = None,
+    ) -> None:
         self.llm_client = llm_client
+        if operational_store is None:
+            from app.core.config import get_settings
 
-    def clear_session(self, phone_number: str) -> None:
-        USER_INTAKE_SESSIONS.pop(self._normalize_phone(phone_number), None)
+            operational_store = OperationalStateStore(get_settings())
+        self.operational_store = operational_store
 
-    def has_active_session(self, phone_number: str) -> bool:
-        return self._get_session(phone_number) is not None
+    async def clear_session(self, phone_number: str, reason: str | None = None) -> None:
+        await self.operational_store.delete_session(
+            self._normalize_phone(phone_number),
+            reason=reason,
+        )
 
-    def has_pending_ticket_finalization(self, phone_number: str) -> bool:
-        session = self._get_session(phone_number)
+    async def has_active_session(self, phone_number: str) -> bool:
+        return await self._get_session(phone_number) is not None
+
+    async def has_pending_ticket_finalization(self, phone_number: str) -> bool:
+        session = await self._get_session(phone_number)
         return bool(
             session
             and session.flow_name == "user_ticket_finalization"
@@ -188,7 +203,7 @@ class UserIntakeService:
         message: NormalizedWhatsAppMessage,
         requester: RequesterIdentity,
     ) -> ConversationContextDecision:
-        session = self._get_session(message.sender_phone)
+        session = await self._get_session(message.sender_phone)
         if session is None:
             return ConversationContextDecision()
 
@@ -210,14 +225,14 @@ class UserIntakeService:
             noun in normalized_text for noun in TICKET_CLOSE_NOUNS
         )
 
-    def start_ticket_finalization(
+    async def start_ticket_finalization(
         self,
         phone_number: str,
         requester_display_name: str | None,
         ticket_options: list[UserTicketOption],
     ) -> UserIntakeOutcome:
         normalized_phone = self._normalize_phone(phone_number)
-        self.clear_session(normalized_phone)
+        await self.clear_session(normalized_phone, reason="refresh_ticket_finalization")
 
         if not ticket_options:
             return UserIntakeOutcome(
@@ -237,16 +252,16 @@ class UserIntakeService:
             stage="awaiting_ticket_selection",
             ticket_options=list(ticket_options),
         )
-        USER_INTAKE_SESSIONS[normalized_phone] = session
+        await self._save_session(session)
         return self._build_ticket_finalization_prompt(session)
 
-    def handle_ticket_finalization_selection(
+    async def handle_ticket_finalization_selection(
         self,
         phone_number: str,
         text: str,
     ) -> UserIntakeOutcome:
         normalized_phone = self._normalize_phone(phone_number)
-        session = USER_INTAKE_SESSIONS.get(normalized_phone)
+        session = await self._get_session(normalized_phone)
         if session is None or session.flow_name != "user_ticket_finalization":
             return UserIntakeOutcome(
                 action="assistant",
@@ -260,7 +275,7 @@ class UserIntakeService:
 
         normalized_text = self._normalize_text(text)
         if normalized_text in CANCEL_MESSAGES:
-            self.clear_session(normalized_phone)
+            await self.clear_session(normalized_phone, reason="user_cancelled_finalization")
             return UserIntakeOutcome(
                 action="assistant",
                 flow_name="user_ticket_finalization",
@@ -278,7 +293,7 @@ class UserIntakeService:
                 ),
             )
 
-        self.clear_session(normalized_phone)
+        await self.clear_session(normalized_phone, reason="ticket_selected_for_finalization")
         return UserIntakeOutcome(
             action="finalize",
             flow_name="user_ticket_finalization",
@@ -287,7 +302,7 @@ class UserIntakeService:
             notes=[f"Usuário escolheu finalizar o ticket {selected_option.ticket_id}."],
         )
 
-    def handle_message(
+    async def handle_message(
         self,
         message: NormalizedWhatsAppMessage,
         requester: RequesterIdentity,
@@ -297,14 +312,14 @@ class UserIntakeService:
         normalized_text = self._normalize_text(text)
 
         if normalized_text in CANCEL_MESSAGES:
-            USER_INTAKE_SESSIONS.pop(normalized_phone, None)
-            session = self._get_or_create_session(normalized_phone, requester.display_name)
+            await self.clear_session(normalized_phone, reason="user_cancelled_catalog")
+            session = await self._get_or_create_session(normalized_phone, requester.display_name)
             return self._build_catalog_prompt(
                 session,
                 extra_note="Atendimento reiniciado. Escolha o tipo do chamado ou descreva melhor o problema.",
             )
 
-        session = USER_INTAKE_SESSIONS.get(normalized_phone)
+        session = await self._get_session(normalized_phone)
         if session is None:
             matched_item = self._match_catalog_item(text)
             if matched_item is None and not self._is_low_information(text) and self._is_descriptive(text):
@@ -313,14 +328,16 @@ class UserIntakeService:
             if matched_item and self._is_descriptive(text) and not self._is_selection_only(text, matched_item):
                 return self._build_open_outcome(matched_item, [text])
 
-            session = self._get_or_create_session(normalized_phone, requester.display_name)
+            session = await self._get_or_create_session(normalized_phone, requester.display_name)
             session.transcript.append(text)
 
             if matched_item:
                 session.selected_catalog_code = matched_item.code
                 session.stage = "awaiting_description"
+                await self._save_session(session)
                 return self._build_description_prompt(session, matched_item)
 
+            await self._save_session(session)
             return self._build_catalog_prompt(
                 session,
                 extra_note="Antes de abrir o chamado, preciso classificar o tipo de atendimento.",
@@ -335,6 +352,7 @@ class UserIntakeService:
                 matched_item = self._fallback_catalog_item()
 
             if matched_item is None:
+                await self._save_session(session)
                 return self._build_catalog_prompt(
                     session,
                     extra_note="Ainda preciso classificar o tipo do chamado. Escolha uma opcao do catalogo ou descreva melhor.",
@@ -342,10 +360,11 @@ class UserIntakeService:
 
             session.selected_catalog_code = matched_item.code
             if self._is_descriptive(text) and not self._is_selection_only(text, matched_item):
-                USER_INTAKE_SESSIONS.pop(normalized_phone, None)
+                await self.clear_session(normalized_phone, reason="ticket_ready_for_open")
                 return self._build_open_outcome(matched_item, session.transcript)
 
             session.stage = "awaiting_description"
+            await self._save_session(session)
             return self._build_description_prompt(session, matched_item)
 
         selected_item = self._selected_item(session)
@@ -353,16 +372,18 @@ class UserIntakeService:
         if remapped_item and self._is_selection_only(text, remapped_item):
             session.selected_catalog_code = remapped_item.code
             selected_item = remapped_item
+            await self._save_session(session)
             return self._build_description_prompt(session, selected_item)
 
         if not self._is_descriptive(text):
+            await self._save_session(session)
             return self._build_description_prompt(
                 session,
                 selected_item,
                 retry=True,
             )
 
-        USER_INTAKE_SESSIONS.pop(normalized_phone, None)
+        await self.clear_session(normalized_phone, reason="ticket_ready_for_open")
         return self._build_open_outcome(selected_item, session.transcript)
 
     def _build_catalog_prompt(
@@ -451,22 +472,67 @@ class UserIntakeService:
     def catalog_options(self) -> list[str]:
         return [f"{item.code}. {item.label}" for item in CATALOG_ITEMS]
 
-    def _get_or_create_session(
+    async def _get_or_create_session(
         self,
         phone_number: str,
         requester_display_name: str | None,
     ) -> UserIntakeSession:
-        session = USER_INTAKE_SESSIONS.get(phone_number)
+        session = await self._get_session(phone_number)
         if session is None:
             session = UserIntakeSession(
                 phone_number=phone_number,
                 requester_display_name=requester_display_name,
             )
-            USER_INTAKE_SESSIONS[phone_number] = session
+            await self._save_session(session)
         return session
 
-    def _get_session(self, phone_number: str) -> UserIntakeSession | None:
-        return USER_INTAKE_SESSIONS.get(self._normalize_phone(phone_number))
+    async def _get_session(self, phone_number: str) -> UserIntakeSession | None:
+        record = await self.operational_store.load_session(self._normalize_phone(phone_number))
+        if record is None:
+            return None
+        return self._record_to_session(record)
+
+    async def _save_session(self, session: UserIntakeSession) -> None:
+        await self.operational_store.save_session(self._session_to_record(session))
+
+    def _session_to_record(self, session: UserIntakeSession) -> OperationalSessionRecord:
+        return OperationalSessionRecord(
+            phone_number=self._normalize_phone(session.phone_number),
+            requester_display_name=session.requester_display_name,
+            flow_name=session.flow_name,
+            stage=session.stage,
+            selected_catalog_code=session.selected_catalog_code,
+            transcript=list(session.transcript),
+            ticket_options=[
+                {
+                    "ticket_id": option.ticket_id,
+                    "subject": option.subject,
+                    "status": option.status,
+                    "updated_at": option.updated_at,
+                }
+                for option in session.ticket_options
+            ],
+        )
+
+    def _record_to_session(self, record: OperationalSessionRecord) -> UserIntakeSession:
+        return UserIntakeSession(
+            phone_number=record.phone_number,
+            requester_display_name=record.requester_display_name,
+            flow_name=record.flow_name,
+            stage=record.stage,
+            selected_catalog_code=record.selected_catalog_code,
+            transcript=list(record.transcript),
+            ticket_options=[
+                UserTicketOption(
+                    ticket_id=option["ticket_id"] or "",
+                    subject=option["subject"] or "",
+                    status=option["status"] or "unknown",
+                    updated_at=option.get("updated_at"),
+                )
+                for option in record.ticket_options
+                if option.get("ticket_id")
+            ],
+        )
 
     def _interpret_context_with_rules(
         self,

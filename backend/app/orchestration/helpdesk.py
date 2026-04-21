@@ -1,4 +1,13 @@
+from datetime import datetime, timedelta, timezone
+
 from app.schemas.helpdesk import (
+    AutomationJobCreateRequest,
+    AutomationJobDecisionRequest,
+    AutomationJobListResponse,
+    AutomationJobResponse,
+    AutomationSummaryResponse,
+    AuditEventListResponse,
+    AuditEventResponse,
     CorrelationRequest,
     CorrelationResponse,
     IdentityLookupResponse,
@@ -16,10 +25,13 @@ from app.schemas.helpdesk import (
     WhatsAppInteractionResponse,
     WhatsAppWebhookProcessingResponse,
 )
+from app.services.automation import AutomationService
 from app.services.exceptions import IntegrationError, ResourceNotFoundError
 from app.services.glpi import GLPIClient
 from app.services.identity import IdentityService
 from app.services.intake import UserIntakeOutcome, UserIntakeService, UserTicketOption
+from app.services.job_queue import JobQueueService
+from app.services.operational_store import JobRequestRecord, OperationalStateStore
 from app.services.triage import TriageAgent, resolve_helpdesk_queue
 from app.services.whatsapp import WhatsAppClient
 from app.services.zabbix import ZabbixClient
@@ -58,6 +70,26 @@ OPERATIONAL_ROLES = {
 TECHNICIAN_ALLOWED_STATUSES = {"processing", "planned", "waiting", "solved"}
 PRIVILEGED_ALLOWED_STATUSES = {"new", "processing", "planned", "waiting", "solved", "closed"}
 USER_FINALIZABLE_STATUSES = {"new", "processing", "planned", "waiting", "solved"}
+AUTO_APPROVAL_REASON_CODE = "policy_auto_approved"
+AUTO_APPROVAL_REASON = "Automacao classificada como low-risk no catalogo homologado."
+APPROVAL_REASON_LABELS = {
+    "change_window_validated": "Janela operacional validada.",
+    "read_only_diagnostic_authorized": "Diagnostico read-only autorizado.",
+    "risk_review_completed": "Revisao de risco concluida.",
+    "rollback_plan_confirmed": "Plano de rollback confirmado.",
+}
+REJECTION_REASON_LABELS = {
+    "outside_change_window": "Ticket fora da janela de atendimento autorizada.",
+    "risk_not_authorized": "Risco acima da alçada autorizada.",
+    "missing_prerequisites": "Pre-requisitos operacionais nao atendidos.",
+    "insufficient_evidence": "Evidencias insuficientes para aprovar a execucao.",
+}
+CANCELLATION_REASON_LABELS = {
+    "change_revoked": "Mudanca revogada antes da execucao.",
+    "scope_changed": "Escopo mudou antes da execucao.",
+    "duplicate_request": "Solicitacao duplicada cancelada.",
+    "manual_intervention_completed": "Intervencao manual concluida; execucao nao e mais necessaria.",
+}
 
 
 class HelpdeskOrchestrator:
@@ -67,15 +99,21 @@ class HelpdeskOrchestrator:
         zabbix_client: ZabbixClient,
         whatsapp_client: WhatsAppClient,
         identity_service: IdentityService,
+        automation_service: AutomationService,
         triage_agent: TriageAgent,
         user_intake_service: UserIntakeService,
+        operational_store: OperationalStateStore,
+        job_queue: JobQueueService,
     ) -> None:
         self.glpi_client = glpi_client
         self.zabbix_client = zabbix_client
         self.whatsapp_client = whatsapp_client
         self.identity_service = identity_service
+        self.automation_service = automation_service
         self.triage_agent = triage_agent
         self.user_intake_service = user_intake_service
+        self.operational_store = operational_store
+        self.job_queue = job_queue
 
     async def triage_ticket(self, payload: TicketTriageRequest) -> TicketTriageResponse:
         return await self.triage_agent.triage(payload)
@@ -126,11 +164,39 @@ class HelpdeskOrchestrator:
             f"Fila sugerida: {triage.suggested_queue}.",
         ]
 
+        integration_mode = self._merge_modes(ticket_result.mode, correlation_mode)
+        await self._audit_event(
+            event_type="ticket_opened",
+            actor_external_id=effective_request.requester.external_id,
+            actor_role=effective_request.requester.role.value,
+            ticket_id=ticket_result.ticket_id,
+            source_channel=self._resolve_source_channel(effective_request.subject),
+            status=ticket_result.status,
+            payload_json={
+                "category": effective_request.category,
+                "asset_name": effective_request.asset_name,
+                "service_name": effective_request.service_name,
+                "priority": effective_request.priority.value,
+                "routed_to": triage.suggested_queue,
+                "identity_source": resolved_requester.source,
+                "integration_mode": integration_mode,
+                "correlation_event_count": len(correlation),
+                "glpi_external_id": ticket_result.external_id,
+                "glpi_request_type_id": ticket_result.request_type_id,
+                "glpi_request_type_name": ticket_result.request_type_name,
+                "glpi_category_id": ticket_result.category_id,
+                "glpi_category_name": ticket_result.category_name,
+                "glpi_linked_item_type": ticket_result.linked_item_type,
+                "glpi_linked_item_id": ticket_result.linked_item_id,
+                "glpi_linked_item_name": ticket_result.linked_item_name,
+            },
+        )
+
         return TicketOpenResponse(
             ticket_id=ticket_result.ticket_id,
             status=ticket_result.status,
             routed_to=triage.suggested_queue,
-            integration_mode=self._merge_modes(ticket_result.mode, correlation_mode),
+            integration_mode=integration_mode,
             requester_role=effective_request.requester.role,
             requester_external_id=effective_request.requester.external_id,
             requester_display_name=effective_request.requester.display_name,
@@ -204,13 +270,16 @@ class HelpdeskOrchestrator:
             )
 
         context_notes: list[str] = []
-        if self.user_intake_service.has_active_session(message.sender_phone):
+        if await self.user_intake_service.has_active_session(message.sender_phone):
             context_decision = await self.user_intake_service.interpret_active_session(
                 message=message,
                 requester=resolved_identity.requester,
             )
             if context_decision.action == "switch_to_ticket_finalization":
-                self.user_intake_service.clear_session(message.sender_phone)
+                await self.user_intake_service.clear_session(
+                    message.sender_phone,
+                    reason="context_switch_to_ticket_finalization",
+                )
                 finalization_prompt = await self._start_user_ticket_finalization(
                     message=message,
                     requester=resolved_identity.requester,
@@ -243,11 +312,14 @@ class HelpdeskOrchestrator:
                     notes=notes,
                 )
             if context_decision.action == "switch_to_new_ticket_intake":
-                self.user_intake_service.clear_session(message.sender_phone)
+                await self.user_intake_service.clear_session(
+                    message.sender_phone,
+                    reason="context_switch_to_new_ticket_intake",
+                )
                 context_notes = context_decision.notes
 
-        if self.user_intake_service.has_pending_ticket_finalization(message.sender_phone):
-            finalization_selection = self.user_intake_service.handle_ticket_finalization_selection(
+        if await self.user_intake_service.has_pending_ticket_finalization(message.sender_phone):
+            finalization_selection = await self.user_intake_service.handle_ticket_finalization_selection(
                 phone_number=message.sender_phone,
                 text=message.text,
             )
@@ -335,7 +407,7 @@ class HelpdeskOrchestrator:
                 notes=notes,
             )
 
-        intake_outcome = self.user_intake_service.handle_message(
+        intake_outcome = await self.user_intake_service.handle_message(
             message=message,
             requester=resolved_identity.requester,
         )
@@ -413,6 +485,402 @@ class HelpdeskOrchestrator:
             limit=request.limit,
         )
         return CorrelationResponse(mode=mode, events=events, notes=notes)
+
+    async def list_audit_events(
+        self,
+        *,
+        limit: int = 20,
+        event_type: str | None = None,
+        ticket_id: str | None = None,
+        actor_external_id: str | None = None,
+    ) -> AuditEventListResponse:
+        result = await self.operational_store.list_audit_events(
+            limit=limit,
+            event_type=event_type,
+            ticket_id=ticket_id,
+            actor_external_id=actor_external_id,
+        )
+        applied_filters = {
+            key: value
+            for key, value in {
+                "event_type": event_type,
+                "ticket_id": ticket_id,
+                "actor_external_id": actor_external_id,
+            }.items()
+            if value
+        }
+        return AuditEventListResponse(
+            storage_mode=result.storage_mode,
+            retention_days=result.retention_days,
+            applied_filters=applied_filters,
+            events=[
+                AuditEventResponse(
+                    event_id=event.event_id,
+                    created_at=event.created_at.isoformat(),
+                    event_type=event.event_type,
+                    actor_external_id=event.actor_external_id,
+                    actor_role=event.actor_role,
+                    ticket_id=event.ticket_id,
+                    source_channel=event.source_channel,
+                    status=event.status,
+                    payload_json=event.payload_json,
+                )
+                for event in result.events
+            ],
+            notes=result.notes,
+        )
+
+    async def request_automation_job(
+        self,
+        payload: AutomationJobCreateRequest,
+    ) -> AutomationJobResponse:
+        validated = self.automation_service.validate_request(
+            automation_name=payload.automation_name,
+            ticket_id=payload.ticket_id,
+            reason=payload.reason,
+            parameters=payload.parameters,
+        )
+        requested_by = payload.requested_by.strip()
+        policy = self.automation_service.get_execution_policy(validated.automation_name)
+        approval_required = bool(policy["approval_required"])
+        approval_status = "pending" if approval_required else "approved"
+        execution_status = "awaiting-approval" if approval_required else "queued"
+        approval_reason_code = None if approval_required else AUTO_APPROVAL_REASON_CODE
+        approval_reason = (
+            None
+            if approval_required
+            else AUTO_APPROVAL_REASON
+        )
+        approval_updated_at = (
+            None if approval_required else datetime.now(timezone.utc).isoformat()
+        )
+        job = await self.operational_store.create_job_request(
+            requested_by=requested_by,
+            ticket_id=validated.ticket_id,
+            automation_name=validated.automation_name,
+            payload_json={
+                "request": {
+                    "reason": validated.reason,
+                    "parameters": validated.parameters,
+                },
+                "policy": policy,
+                "approval": {
+                    "status": approval_status,
+                    "acted_by": None if approval_required else "system-policy",
+                    "reason_code": approval_reason_code,
+                    "reason": approval_reason,
+                    "updated_at": approval_updated_at,
+                },
+            },
+            approval_status=approval_status,
+            execution_status=execution_status,
+        )
+        queue_mode: str | None = None
+        response_notes: list[str] = []
+
+        if approval_required:
+            effective_job = job
+            response_notes = [
+                "Job aguardando aprovacao explicita antes de entrar na fila de execucao."
+            ]
+        else:
+            enqueue_result = await self.job_queue.enqueue_job(job.job_id)
+            annotated_job = await self.operational_store.annotate_job_queue(
+                job.job_id,
+                queue_mode=enqueue_result.queue_mode,
+                queue_key=enqueue_result.queue_key,
+                notes=enqueue_result.notes,
+            )
+            effective_job = annotated_job or job
+            queue_mode = enqueue_result.queue_mode
+            response_notes = enqueue_result.notes
+
+            await self._audit_event(
+                event_type="automation_job_approved",
+                actor_external_id="system-policy",
+                actor_role="automation-policy",
+                ticket_id=validated.ticket_id,
+                source_channel="api",
+                status=effective_job.execution_status,
+                payload_json={
+                    "automation_name": effective_job.automation_name,
+                    "job_id": effective_job.job_id,
+                    "approval_mode": policy["approval_mode"],
+                    "risk_level": policy["risk_level"],
+                    "queue_mode": queue_mode,
+                },
+            )
+
+        await self._audit_event(
+            event_type="automation_job_requested",
+            actor_external_id=requested_by,
+            actor_role="automation-admin",
+            ticket_id=validated.ticket_id,
+            source_channel="api",
+            status=effective_job.execution_status,
+            payload_json={
+                "automation_name": effective_job.automation_name,
+                "job_id": effective_job.job_id,
+                "risk_level": policy["risk_level"],
+                "approval_mode": policy["approval_mode"],
+                "approval_required": approval_required,
+                "queue_mode": queue_mode,
+            },
+        )
+        return self._to_automation_job_response(
+            effective_job,
+            queue_mode=queue_mode,
+            notes=response_notes,
+        )
+
+    async def approve_automation_job(
+        self,
+        job_id: str,
+        payload: AutomationJobDecisionRequest,
+    ) -> AutomationJobResponse:
+        acted_by = payload.acted_by.strip()
+        reason_code, reason_label = self._resolve_decision_reason(
+            payload.reason_code,
+            reason_labels=APPROVAL_REASON_LABELS,
+            action_label="approve",
+        )
+        approved_job = await self.operational_store.approve_job_request(
+            job_id,
+            acted_by=acted_by,
+            reason_code=reason_code,
+            reason=reason_label,
+        )
+        if approved_job is None:
+            current_job = await self.operational_store.get_job_request(job_id)
+            if current_job is None:
+                raise ResourceNotFoundError(f"Job {job_id} nao encontrado.")
+            raise ValueError(
+                f"Job {job_id} nao esta aguardando aprovacao. Status atual: {current_job.approval_status}/{current_job.execution_status}."
+            )
+
+        enqueue_result = await self.job_queue.enqueue_job(job_id)
+        annotated_job = await self.operational_store.annotate_job_queue(
+            job_id,
+            queue_mode=enqueue_result.queue_mode,
+            queue_key=enqueue_result.queue_key,
+            notes=enqueue_result.notes,
+        )
+        effective_job = annotated_job or approved_job
+
+        await self._audit_event(
+            event_type="automation_job_approved",
+            actor_external_id=acted_by,
+            actor_role="automation-approver",
+            ticket_id=effective_job.ticket_id,
+            source_channel="api",
+            status=effective_job.execution_status,
+            payload_json={
+                "automation_name": effective_job.automation_name,
+                "job_id": effective_job.job_id,
+                "queue_mode": enqueue_result.queue_mode,
+                "approval_reason_code": reason_code,
+                "approval_reason": reason_label,
+            },
+        )
+        return self._to_automation_job_response(
+            effective_job,
+            queue_mode=enqueue_result.queue_mode,
+            notes=enqueue_result.notes,
+        )
+
+    async def reject_automation_job(
+        self,
+        job_id: str,
+        payload: AutomationJobDecisionRequest,
+    ) -> AutomationJobResponse:
+        acted_by = payload.acted_by.strip()
+        reason_code, reason_label = self._resolve_decision_reason(
+            payload.reason_code,
+            reason_labels=REJECTION_REASON_LABELS,
+            action_label="reject",
+        )
+        rejected_job = await self.operational_store.reject_job_request(
+            job_id,
+            acted_by=acted_by,
+            reason_code=reason_code,
+            reason=reason_label,
+        )
+        if rejected_job is None:
+            current_job = await self.operational_store.get_job_request(job_id)
+            if current_job is None:
+                raise ResourceNotFoundError(f"Job {job_id} nao encontrado.")
+            raise ValueError(
+                f"Job {job_id} nao esta aguardando aprovacao. Status atual: {current_job.approval_status}/{current_job.execution_status}."
+            )
+
+        await self._audit_event(
+            event_type="automation_job_rejected",
+            actor_external_id=acted_by,
+            actor_role="automation-approver",
+            ticket_id=rejected_job.ticket_id,
+            source_channel="api",
+            status=rejected_job.execution_status,
+            payload_json={
+                "automation_name": rejected_job.automation_name,
+                "job_id": rejected_job.job_id,
+                "approval_reason_code": reason_code,
+                "approval_reason": reason_label,
+            },
+        )
+        return self._to_automation_job_response(rejected_job)
+
+    async def cancel_automation_job(
+        self,
+        job_id: str,
+        payload: AutomationJobDecisionRequest,
+    ) -> AutomationJobResponse:
+        acted_by = payload.acted_by.strip()
+        reason_code, reason_label = self._resolve_decision_reason(
+            payload.reason_code,
+            reason_labels=CANCELLATION_REASON_LABELS,
+            action_label="cancel",
+        )
+        current_job = await self.operational_store.get_job_request(job_id)
+        if current_job is None:
+            raise ResourceNotFoundError(f"Job {job_id} nao encontrado.")
+
+        cancelled_job = await self.operational_store.cancel_job_request(
+            job_id,
+            acted_by=acted_by,
+            reason_code=reason_code,
+            reason=reason_label,
+        )
+        if cancelled_job is None:
+            raise ValueError(
+                f"Job {job_id} nao pode ser cancelado. Status atual: {current_job.approval_status}/{current_job.execution_status}."
+            )
+
+        response_notes: list[str] = []
+        queue_mode: str | None = None
+        removed_count = 0
+        if current_job.execution_status == "queued":
+            remove_result = await self.job_queue.remove_job(job_id)
+            queue_mode = remove_result.queue_mode
+            response_notes = remove_result.notes
+            removed_count = remove_result.removed_count
+
+        await self._audit_event(
+            event_type="automation_job_cancelled",
+            actor_external_id=acted_by,
+            actor_role="automation-approver",
+            ticket_id=cancelled_job.ticket_id,
+            source_channel="api",
+            status=cancelled_job.execution_status,
+            payload_json={
+                "automation_name": cancelled_job.automation_name,
+                "job_id": cancelled_job.job_id,
+                "previous_execution_status": current_job.execution_status,
+                "cancellation_reason_code": reason_code,
+                "cancellation_reason": reason_label,
+                "queue_mode": queue_mode,
+                "queue_removed_count": removed_count,
+            },
+        )
+        return self._to_automation_job_response(
+            cancelled_job,
+            queue_mode=queue_mode,
+            notes=response_notes,
+        )
+
+    async def get_automation_job(self, job_id: str) -> AutomationJobResponse:
+        job = await self.operational_store.get_job_request(job_id)
+        if job is None:
+            raise ResourceNotFoundError(f"Job {job_id} nao encontrado.")
+        return self._to_automation_job_response(job)
+
+    async def list_automation_jobs(
+        self,
+        *,
+        limit: int = 20,
+        automation_name: str | None = None,
+        ticket_id: str | None = None,
+        approval_status: str | None = None,
+        execution_status: str | None = None,
+    ) -> AutomationJobListResponse:
+        result = await self.operational_store.list_job_requests(
+            limit=limit,
+            automation_name=automation_name,
+            ticket_id=ticket_id,
+            approval_status=approval_status,
+            execution_status=execution_status,
+        )
+        applied_filters = {
+            key: value
+            for key, value in {
+                "automation_name": automation_name,
+                "ticket_id": ticket_id,
+                "approval_status": approval_status,
+                "execution_status": execution_status,
+            }.items()
+            if value
+        }
+        return AutomationJobListResponse(
+            storage_mode=result.storage_mode,
+            applied_filters=applied_filters,
+            jobs=[self._to_automation_job_response(job) for job in result.jobs],
+            notes=result.notes,
+        )
+
+    async def get_automation_summary(self) -> AutomationSummaryResponse:
+        job_summary = await self.operational_store.summarize_job_requests()
+        queue_snapshot = await self.job_queue.get_queue_snapshot()
+
+        approval_timeout_minutes = self.operational_store.settings.automation_approval_timeout_minutes
+        oldest_pending_approval_expires_at = None
+        if (
+            approval_timeout_minutes is not None
+            and job_summary.oldest_pending_approval_started_at is not None
+        ):
+            oldest_pending_approval_expires_at = (
+                job_summary.oldest_pending_approval_started_at
+                + timedelta(minutes=approval_timeout_minutes)
+            ).isoformat()
+
+        notes = [*job_summary.notes, *queue_snapshot.notes]
+        deduplicated_notes = list(dict.fromkeys(note for note in notes if note))
+
+        return AutomationSummaryResponse(
+            storage_mode=job_summary.storage_mode,
+            queue_mode=queue_snapshot.queue_mode,
+            approval_timeout_minutes=approval_timeout_minutes,
+            total_jobs=job_summary.total_jobs,
+            approval_status_counts=job_summary.approval_status_counts,
+            execution_status_counts=job_summary.execution_status_counts,
+            queue_depth=queue_snapshot.queue_depth,
+            dead_letter_queue_depth=queue_snapshot.dead_letter_queue_depth,
+            oldest_job_created_at=(
+                job_summary.oldest_job_created_at.isoformat()
+                if job_summary.oldest_job_created_at is not None
+                else None
+            ),
+            oldest_pending_approval_started_at=(
+                job_summary.oldest_pending_approval_started_at.isoformat()
+                if job_summary.oldest_pending_approval_started_at is not None
+                else None
+            ),
+            oldest_pending_approval_expires_at=oldest_pending_approval_expires_at,
+            oldest_queued_job_created_at=(
+                job_summary.oldest_queued_job_created_at.isoformat()
+                if job_summary.oldest_queued_job_created_at is not None
+                else None
+            ),
+            oldest_running_started_at=(
+                job_summary.oldest_running_started_at.isoformat()
+                if job_summary.oldest_running_started_at is not None
+                else None
+            ),
+            oldest_retry_scheduled_at=(
+                job_summary.oldest_retry_scheduled_at.isoformat()
+                if job_summary.oldest_retry_scheduled_at is not None
+                else None
+            ),
+            notes=deduplicated_notes,
+        )
 
     async def process_whatsapp_webhook_messages(
         self,
@@ -666,6 +1134,7 @@ class HelpdeskOrchestrator:
             notification_notes: list[str] = []
             operation_mode = result.mode
             reply_text = f"Comentário adicionado ao ticket {ticket.ticket_id}."
+            requester_notified = False
 
             if ticket.requester_glpi_user_id:
                 try:
@@ -686,6 +1155,7 @@ class HelpdeskOrchestrator:
                         )
                         operation_mode = self._merge_modes(result.mode, requester_delivery.mode)
                         notification_notes.extend(requester_delivery.notes)
+                        requester_notified = True
                         requester_name = (
                             requester_identity.requester.display_name
                             or requester_identity.requester.external_id
@@ -719,6 +1189,20 @@ class HelpdeskOrchestrator:
                 notification_notes.append(
                     "Ticket sem solicitante resolvido; notificação automática não enviada."
                 )
+
+            await self._audit_event(
+                event_type="ticket_followup_added",
+                actor_external_id=requester.external_id,
+                actor_role=requester.role.value,
+                ticket_id=ticket.ticket_id,
+                source_channel="whatsapp",
+                status="completed",
+                payload_json={
+                    "integration_mode": operation_mode,
+                    "requester_lookup_attempted": bool(ticket.requester_glpi_user_id),
+                    "requester_notified": requester_notified,
+                },
+            )
 
             return TechnicianCommandResponse(
                 command_name="comment",
@@ -776,6 +1260,18 @@ class HelpdeskOrchestrator:
                 )
 
             ticket = self._to_ticket_details_response(result.ticket)
+            await self._audit_event(
+                event_type="ticket_status_changed",
+                actor_external_id=requester.external_id,
+                actor_role=requester.role.value,
+                ticket_id=ticket.ticket_id,
+                source_channel="whatsapp",
+                status=ticket.status,
+                payload_json={
+                    "integration_mode": result.mode,
+                    "new_status": ticket.status,
+                },
+            )
             return TechnicianCommandResponse(
                 command_name="status",
                 status="completed",
@@ -849,6 +1345,19 @@ class HelpdeskOrchestrator:
                 )
 
             ticket = self._to_ticket_details_response(result.ticket)
+            await self._audit_event(
+                event_type="ticket_assigned",
+                actor_external_id=requester.external_id,
+                actor_role=requester.role.value,
+                ticket_id=ticket.ticket_id,
+                source_channel="whatsapp",
+                status="completed",
+                payload_json={
+                    "assignee_external_id": target_identity.external_id,
+                    "assignee_role": target_identity.role.value,
+                    "integration_mode": result.mode,
+                },
+            )
             return TechnicianCommandResponse(
                 command_name="assign",
                 status="completed",
@@ -1044,7 +1553,10 @@ class HelpdeskOrchestrator:
         requester: RequesterIdentity,
     ) -> UserIntakeOutcome:
         if not requester.glpi_user_id:
-            self.user_intake_service.clear_session(message.sender_phone)
+            await self.user_intake_service.clear_session(
+                message.sender_phone,
+                reason="missing_requester_glpi_user_id",
+            )
             return UserIntakeOutcome(
                 action="assistant",
                 flow_name="user_ticket_finalization",
@@ -1055,7 +1567,10 @@ class HelpdeskOrchestrator:
                 notes=["Fluxo de finalização recusado por ausência de glpi_user_id no solicitante."],
             )
 
-        self.user_intake_service.clear_session(message.sender_phone)
+        await self.user_intake_service.clear_session(
+            message.sender_phone,
+            reason="ticket_finalization_refresh",
+        )
         tickets = await self.glpi_client.list_tickets_for_requester(
             requester_glpi_user_id=requester.glpi_user_id,
             include_closed=False,
@@ -1071,11 +1586,22 @@ class HelpdeskOrchestrator:
             )
             for ticket in tickets
         ]
-        return self.user_intake_service.start_ticket_finalization(
+        outcome = await self.user_intake_service.start_ticket_finalization(
             phone_number=message.sender_phone,
             requester_display_name=requester.display_name,
             ticket_options=ticket_options,
         )
+        await self._audit_event(
+            event_type="ticket_finalization_requested",
+            actor_external_id=requester.external_id,
+            actor_role=requester.role.value,
+            source_channel="whatsapp",
+            status="completed",
+            payload_json={
+                "options_available": len(ticket_options),
+            },
+        )
+        return outcome
 
     async def _finalize_selected_user_ticket(
         self,
@@ -1097,6 +1623,17 @@ class HelpdeskOrchestrator:
                 f"O chamado {current_ticket.ticket_id} não pode ser finalizado agora porque está em "
                 f"status {current_ticket.status}. Só é possível finalizar chamados que ainda estejam abertos."
             )
+            await self._audit_event(
+                event_type="ticket_finalization_rejected",
+                actor_external_id=requester.external_id,
+                actor_role=requester.role.value,
+                ticket_id=current_ticket.ticket_id,
+                source_channel="whatsapp",
+                status=current_ticket.status,
+                payload_json={
+                    "selected_option": selected_option,
+                },
+            )
             return OperationalAssistantResponse(
                 role=requester.role,
                 flow_name="user_ticket_finalization",
@@ -1108,6 +1645,7 @@ class HelpdeskOrchestrator:
 
         status_result = await self.glpi_client.update_ticket_status(selected_ticket_id, "closed")
         notes = [*base_notes, *status_result.notes]
+        followup_recorded = False
         try:
             followup_result = await self.glpi_client.add_ticket_followup(
                 ticket_id=selected_ticket_id,
@@ -1119,6 +1657,7 @@ class HelpdeskOrchestrator:
             )
             notes.extend(followup_result.notes)
             ticket = followup_result.ticket
+            followup_recorded = True
         except IntegrationError as exc:
             ticket = status_result.ticket
             notes.append(
@@ -1131,6 +1670,19 @@ class HelpdeskOrchestrator:
         )
         if selected_option:
             reply_text += f" Seleção confirmada: {selected_option}."
+
+        await self._audit_event(
+            event_type="ticket_finalized_by_user",
+            actor_external_id=requester.external_id,
+            actor_role=requester.role.value,
+            ticket_id=ticket.ticket_id,
+            source_channel="whatsapp",
+            status=ticket.status,
+            payload_json={
+                "selected_option": selected_option,
+                "followup_recorded": followup_recorded,
+            },
+        )
 
         return OperationalAssistantResponse(
             role=requester.role,
@@ -1178,6 +1730,180 @@ class HelpdeskOrchestrator:
             notes=ticket.notes,
         )
 
+    def _to_automation_job_response(
+        self,
+        job: JobRequestRecord,
+        *,
+        queue_mode: str | None = None,
+        notes: list[str] | None = None,
+    ) -> AutomationJobResponse:
+        policy_section = self._extract_policy_metadata(job.payload_json)
+        approval_section = self._extract_approval_metadata(job.payload_json)
+        execution_section = self._extract_execution_metadata(job.payload_json)
+        return AutomationJobResponse(
+            job_id=job.job_id,
+            created_at=job.created_at.isoformat(),
+            requested_by=job.requested_by,
+            ticket_id=job.ticket_id,
+            automation_name=job.automation_name,
+            risk_level=policy_section["risk_level"],
+            approval_mode=policy_section["approval_mode"],
+            approval_required=policy_section["approval_required"],
+            approval_status=job.approval_status,
+            approval_acted_by=approval_section["acted_by"],
+            approval_reason_code=approval_section["reason_code"],
+            approval_reason=approval_section["reason"],
+            approval_updated_at=approval_section["updated_at"],
+            execution_status=job.execution_status,
+            attempt_count=execution_section["attempt_count"],
+            max_attempts=execution_section["max_attempts"],
+            retry_scheduled_at=execution_section["retry_scheduled_at"],
+            retry_delay_seconds=execution_section["retry_delay_seconds"],
+            last_error=execution_section["last_error"],
+            dead_lettered_at=execution_section["dead_lettered_at"],
+            cancelled_by=execution_section["cancelled_by"],
+            cancellation_reason_code=execution_section["cancellation_reason_code"],
+            cancellation_reason=execution_section["cancellation_reason"],
+            cancelled_at=execution_section["cancelled_at"],
+            queue_mode=queue_mode or self._extract_queue_mode(job.payload_json),
+            payload_json=job.payload_json,
+            notes=notes or [],
+        )
+
+    def _extract_queue_mode(self, payload_json: dict[str, object]) -> str | None:
+        queue_section = payload_json.get("queue")
+        if not isinstance(queue_section, dict):
+            return None
+        queue_mode = queue_section.get("delivery_mode") or queue_section.get("mode")
+        if queue_mode is None:
+            return None
+        return str(queue_mode)
+
+    def _extract_execution_metadata(self, payload_json: dict[str, object]) -> dict[str, object]:
+        execution_section = payload_json.get("execution")
+        if not isinstance(execution_section, dict):
+            return {
+                "attempt_count": 0,
+                "max_attempts": 1,
+                "retry_scheduled_at": None,
+                "retry_delay_seconds": None,
+                "last_error": None,
+                "dead_lettered_at": None,
+                "cancelled_by": None,
+                "cancellation_reason_code": None,
+                "cancellation_reason": None,
+                "cancelled_at": None,
+            }
+
+        attempt_count = execution_section.get("attempt_count")
+        max_attempts = execution_section.get("max_attempts")
+        retry_scheduled_at = execution_section.get("retry_scheduled_at")
+        retry_delay_seconds = execution_section.get("retry_delay_seconds")
+        last_error = execution_section.get("last_error")
+        dead_lettered_at = execution_section.get("dead_lettered_at")
+        cancellation = execution_section.get("cancellation")
+
+        if not isinstance(attempt_count, int):
+            attempt_count = 0
+        if not isinstance(max_attempts, int):
+            max_attempts = 1
+        if not isinstance(retry_delay_seconds, int):
+            retry_delay_seconds = None
+
+        last_error_message: str | None = None
+        if isinstance(last_error, dict):
+            message = last_error.get("message")
+            if message is not None:
+                last_error_message = str(message)
+        elif last_error is not None:
+            last_error_message = str(last_error)
+
+        cancelled_by: str | None = None
+        cancellation_reason_code: str | None = None
+        cancellation_reason: str | None = None
+        cancelled_at: str | None = None
+        if isinstance(cancellation, dict):
+            acted_by = cancellation.get("acted_by")
+            reason_code = cancellation.get("reason_code")
+            reason = cancellation.get("reason")
+            cancelled_value = cancellation.get("cancelled_at")
+            if acted_by is not None:
+                cancelled_by = str(acted_by)
+            if reason_code is not None:
+                cancellation_reason_code = str(reason_code)
+            if reason is not None:
+                cancellation_reason = str(reason)
+            if cancelled_value:
+                cancelled_at = str(cancelled_value)
+
+        return {
+            "attempt_count": max(attempt_count, 0),
+            "max_attempts": max(max_attempts, 1),
+            "retry_scheduled_at": (
+                str(retry_scheduled_at) if retry_scheduled_at else None
+            ),
+            "retry_delay_seconds": retry_delay_seconds,
+            "last_error": last_error_message,
+            "dead_lettered_at": str(dead_lettered_at) if dead_lettered_at else None,
+            "cancelled_by": cancelled_by,
+            "cancellation_reason_code": cancellation_reason_code,
+            "cancellation_reason": cancellation_reason,
+            "cancelled_at": cancelled_at,
+        }
+
+    def _extract_policy_metadata(self, payload_json: dict[str, object]) -> dict[str, object]:
+        policy_section = payload_json.get("policy")
+        if not isinstance(policy_section, dict):
+            return {
+                "risk_level": None,
+                "approval_mode": None,
+                "approval_required": False,
+            }
+
+        approval_required = policy_section.get("approval_required")
+        return {
+            "risk_level": str(policy_section.get("risk_level")) if policy_section.get("risk_level") else None,
+            "approval_mode": str(policy_section.get("approval_mode")) if policy_section.get("approval_mode") else None,
+            "approval_required": bool(approval_required),
+        }
+
+    def _extract_approval_metadata(self, payload_json: dict[str, object]) -> dict[str, object]:
+        approval_section = payload_json.get("approval")
+        if not isinstance(approval_section, dict):
+            return {
+                "acted_by": None,
+                "reason_code": None,
+                "reason": None,
+                "updated_at": None,
+            }
+
+        acted_by = approval_section.get("acted_by")
+        reason_code = approval_section.get("reason_code")
+        reason = approval_section.get("reason")
+        updated_at = approval_section.get("updated_at")
+        return {
+            "acted_by": str(acted_by) if acted_by else None,
+            "reason_code": str(reason_code) if reason_code else None,
+            "reason": str(reason) if reason else None,
+            "updated_at": str(updated_at) if updated_at else None,
+        }
+
+    def _resolve_decision_reason(
+        self,
+        reason_code: str,
+        *,
+        reason_labels: dict[str, str],
+        action_label: str,
+    ) -> tuple[str, str]:
+        normalized_reason_code = str(reason_code).strip().lower()
+        if normalized_reason_code in reason_labels:
+            return normalized_reason_code, reason_labels[normalized_reason_code]
+
+        allowed_codes = ", ".join(sorted(reason_labels))
+        raise ValueError(
+            f"reason_code invalido para {action_label}. Use um de: {allowed_codes}."
+        )
+
     def _should_handle_as_operator_command(
         self,
         text: str,
@@ -1206,6 +1932,35 @@ class HelpdeskOrchestrator:
         priority: TicketPriority,
     ) -> str:
         return resolve_helpdesk_queue(category, priority)
+
+    def _resolve_source_channel(self, subject: str) -> str:
+        normalized_subject = subject.strip().lower()
+        if normalized_subject.startswith("operacional whatsapp:"):
+            return "whatsapp-operator"
+        if normalized_subject.startswith("whatsapp:"):
+            return "whatsapp"
+        return "api"
+
+    async def _audit_event(
+        self,
+        *,
+        event_type: str,
+        actor_external_id: str | None = None,
+        actor_role: str | None = None,
+        ticket_id: str | None = None,
+        source_channel: str,
+        status: str,
+        payload_json: dict[str, object] | None = None,
+    ) -> None:
+        await self.operational_store.record_audit_event(
+            event_type=event_type,
+            actor_external_id=actor_external_id,
+            actor_role=actor_role,
+            ticket_id=ticket_id,
+            source_channel=source_channel,
+            status=status,
+            payload_json=payload_json,
+        )
 
     def _merge_modes(self, left_mode: str, right_mode: str) -> str:
         if left_mode == right_mode:

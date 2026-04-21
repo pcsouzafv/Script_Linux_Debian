@@ -1,0 +1,7 @@
+---
+- name: Validate local Ansible Runner control path
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Ping localhost via Ansible builtin module
+      ansible.builtin.ping:

@@ -1,16 +1,30 @@
+import asyncio
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
 
 from fastapi.testclient import TestClient
 
+import app.services.operational_store as operational_store_module
+
 from app.core.config import get_settings
 from app.main import app
 from app.services.glpi import MOCK_TICKET_STORE
+from app.services.job_queue import JobQueueService
+from app.services.operational_store import OperationalStateStore, get_memory_audit_events
 
 
 client = TestClient(app)
 API_HEADERS = {"X-Helpdesk-API-Key": "test-api-token"}
+AUDIT_HEADERS = {"X-Helpdesk-Audit-Key": "test-audit-token"}
+AUTOMATION_HEADERS = {"X-Helpdesk-Automation-Key": "test-automation-token"}
+AUTOMATION_READ_HEADERS = {
+    "X-Helpdesk-Automation-Read-Key": "test-automation-read-token"
+}
+AUTOMATION_APPROVAL_HEADERS = {
+    "X-Helpdesk-Automation-Approval-Key": "test-automation-approval-token"
+}
 client.headers.update(API_HEADERS)
 
 
@@ -34,6 +48,928 @@ def test_protected_route_rejects_missing_api_token() -> None:
 
     assert response.status_code == 401
     assert "credenciais" in response.json()["detail"].lower()
+
+
+def test_protected_route_accepts_previous_api_token_during_rotation() -> None:
+    settings = get_settings()
+    original_previous = settings.api_access_token_previous
+    settings.api_access_token_previous = "test-api-token-previous"
+
+    try:
+        response = client.post(
+            "/api/v1/helpdesk/triage",
+            headers={"X-Helpdesk-API-Key": "test-api-token-previous"},
+            json={
+                "subject": "Teste com token anterior",
+                "description": "Validando a janela de rotacao do token interno geral.",
+            },
+        )
+    finally:
+        settings.api_access_token_previous = original_previous
+
+    assert response.status_code == 200
+
+
+def test_audit_route_rejects_api_token_without_dedicated_audit_token() -> None:
+    response = client.get("/api/v1/helpdesk/audit/events?event_type=ticket_opened")
+
+    assert response.status_code == 401
+    assert "auditoria administrativa" in response.json()["detail"].lower()
+
+
+def test_audit_route_accepts_previous_audit_token_during_rotation() -> None:
+    settings = get_settings()
+    original_previous = settings.audit_access_token_previous
+    settings.audit_access_token_previous = "test-audit-token-previous"
+
+    try:
+        response = client.get(
+            "/api/v1/helpdesk/audit/events?event_type=ticket_opened",
+            headers={"X-Helpdesk-Audit-Key": "test-audit-token-previous"},
+        )
+    finally:
+        settings.audit_access_token_previous = original_previous
+
+    assert response.status_code == 200
+
+
+def test_automation_route_rejects_api_token_without_dedicated_automation_token() -> None:
+    response = client.get("/api/v1/helpdesk/automation/jobs")
+
+    assert response.status_code == 401
+    assert "administrativa" in response.json()["detail"].lower()
+
+
+def test_automation_route_accepts_previous_automation_token_during_rotation() -> None:
+    settings = get_settings()
+    original_previous = settings.automation_access_token_previous
+    settings.automation_access_token_previous = "test-automation-token-previous"
+
+    try:
+        response = client.post(
+            "/api/v1/helpdesk/automation/jobs",
+            headers={"X-Helpdesk-Automation-Key": "test-automation-token-previous"},
+            json={
+                "requested_by": "ops-ana",
+                "automation_name": "noop.healthcheck",
+                "reason": "Teste com token anterior de escrita",
+            },
+        )
+    finally:
+        settings.automation_access_token_previous = original_previous
+
+    assert response.status_code == 202
+
+
+def test_automation_job_create_rejects_requested_by_with_spaces() -> None:
+    response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops ana",
+            "automation_name": "noop.healthcheck",
+            "reason": "Validar identificador administrativo",
+        },
+    )
+
+    assert response.status_code == 422
+    assert any(item["loc"][-1] == "requested_by" for item in response.json()["detail"])
+
+
+def test_automation_read_route_rejects_write_token_when_dedicated_read_token_is_configured() -> None:
+    response = client.get(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+    )
+
+    assert response.status_code == 401
+    assert "leitura administrativa de automação" in response.json()["detail"].lower()
+
+
+def test_automation_read_route_accepts_previous_read_token_during_rotation() -> None:
+    settings = get_settings()
+    original_previous = settings.automation_read_access_token_previous
+    settings.automation_read_access_token_previous = "test-automation-read-token-previous"
+
+    try:
+        response = client.get(
+            "/api/v1/helpdesk/automation/jobs",
+            headers={"X-Helpdesk-Automation-Read-Key": "test-automation-read-token-previous"},
+        )
+    finally:
+        settings.automation_read_access_token_previous = original_previous
+
+    assert response.status_code == 200
+
+
+def test_automation_summary_route_rejects_write_token_when_read_scope_is_required() -> None:
+    response = client.get(
+        "/api/v1/helpdesk/automation/summary",
+        headers=AUTOMATION_HEADERS,
+    )
+
+    assert response.status_code == 401
+    assert "leitura administrativa de automação" in response.json()["detail"].lower()
+
+
+def test_automation_approval_route_rejects_automation_token_without_dedicated_approval_token() -> None:
+    response = client.post(
+        "/api/v1/helpdesk/automation/jobs/non-existent/approve",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "change_window_validated",
+        },
+    )
+
+    assert response.status_code == 401
+    assert "aprovação administrativa de automação" in response.json()["detail"].lower()
+
+
+def test_automation_approval_rejects_acted_by_with_spaces() -> None:
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "noop.healthcheck",
+            "reason": "Validar identificador de aprovacao",
+        },
+    )
+
+    response = client.post(
+        f"/api/v1/helpdesk/automation/jobs/{create_response.json()['job_id']}/approve",
+        headers=AUTOMATION_APPROVAL_HEADERS,
+        json={
+            "acted_by": "supervisor ana",
+            "reason_code": "change_window_validated",
+        },
+    )
+
+    assert response.status_code == 422
+    assert any(item["loc"][-1] == "acted_by" for item in response.json()["detail"])
+
+
+def test_automation_approval_route_accepts_previous_approval_token_during_rotation() -> None:
+    settings = get_settings()
+    original_previous = settings.automation_approval_access_token_previous
+    settings.automation_approval_access_token_previous = "test-automation-approval-token-previous"
+
+    try:
+        ticket_response = client.post(
+            "/api/v1/helpdesk/tickets/open",
+            json={
+                "subject": "Chamado aguardando aprovacao por token anterior",
+                "description": "Valida a janela de rotacao do token de aprovacao.",
+                "requester": {
+                    "external_id": "user-approval-rotation",
+                    "display_name": "Usuario Approval Rotation",
+                    "phone_number": "+5511912207788",
+                    "role": "user",
+                },
+            },
+        )
+        job_response = client.post(
+            "/api/v1/helpdesk/automation/jobs",
+            headers=AUTOMATION_HEADERS,
+            json={
+                "requested_by": "ops-ana",
+                "automation_name": "glpi.ticket_snapshot",
+                "ticket_id": ticket_response.json()["ticket_id"],
+                "reason": "Teste com token anterior de aprovacao",
+            },
+        )
+        job_id = job_response.json()["job_id"]
+
+        response = client.post(
+            f"/api/v1/helpdesk/automation/jobs/{job_id}/approve",
+            headers={
+                "X-Helpdesk-Automation-Approval-Key": "test-automation-approval-token-previous"
+            },
+            json={
+                "acted_by": "supervisor-ana",
+                "reason_code": "change_window_validated",
+            },
+        )
+    finally:
+        settings.automation_approval_access_token_previous = original_previous
+
+    assert response.status_code == 200
+
+
+def test_automation_cancel_route_rejects_automation_token_without_dedicated_approval_token() -> None:
+    response = client.post(
+        "/api/v1/helpdesk/automation/jobs/non-existent/cancel",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "change_revoked",
+        },
+    )
+
+    assert response.status_code == 401
+    assert "aprovação administrativa de automação" in response.json()["detail"].lower()
+
+
+def test_create_automation_job_enqueues_and_lists_job() -> None:
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "noop.healthcheck",
+            "reason": "Smoke test da fila interna",
+            "parameters": {"probe_label": "lab"},
+        },
+    )
+
+    assert create_response.status_code == 202
+    create_body = create_response.json()
+    assert create_body["automation_name"] == "noop.healthcheck"
+    assert create_body["risk_level"] == "low"
+    assert create_body["approval_mode"] == "auto"
+    assert create_body["approval_required"] is False
+    assert create_body["approval_status"] == "approved"
+    assert create_body["approval_acted_by"] == "system-policy"
+    assert create_body["approval_reason_code"] == "policy_auto_approved"
+    assert "low-risk" in create_body["approval_reason"]
+    assert create_body["approval_updated_at"] is not None
+    assert create_body["execution_status"] == "queued"
+    assert create_body["attempt_count"] == 0
+    assert create_body["max_attempts"] == 3
+    assert create_body["last_error"] is None
+    assert create_body["queue_mode"] == "memory"
+    assert create_body["payload_json"]["request"]["reason"] == "Smoke test da fila interna"
+
+    job_id = create_body["job_id"]
+    list_response = client.get(
+        "/api/v1/helpdesk/automation/jobs?approval_status=approved&execution_status=queued",
+        headers=AUTOMATION_READ_HEADERS,
+    )
+    detail_response = client.get(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}",
+        headers=AUTOMATION_READ_HEADERS,
+    )
+
+    assert list_response.status_code == 200
+    assert detail_response.status_code == 200
+    list_body = list_response.json()
+    assert list_body["storage_mode"] == "memory"
+    assert any(job["job_id"] == job_id for job in list_body["jobs"])
+    assert detail_response.json()["job_id"] == job_id
+
+
+def test_automation_summary_route_reports_operational_state() -> None:
+    queued_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "noop.healthcheck",
+            "reason": "Job enfileirado para resumo operacional",
+        },
+    )
+
+    assert queued_response.status_code == 202
+
+    ticket_response = client.post(
+        "/api/v1/helpdesk/tickets/open",
+        json={
+            "subject": "Chamado aguardando aprovacao para resumo",
+            "description": "Chamado de teste para compor o resumo operacional da fila.",
+            "requester": {
+                "external_id": "user-summary-probe",
+                "display_name": "Usuario Summary Probe",
+                "phone_number": "+5511913304455",
+                "role": "user",
+            },
+        },
+    )
+    ticket_id = ticket_response.json()["ticket_id"]
+
+    pending_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "glpi.ticket_snapshot",
+            "ticket_id": ticket_id,
+            "reason": "Job manual para aparecer como aguardando aprovacao",
+        },
+    )
+
+    assert pending_response.status_code == 202
+
+    settings = get_settings()
+    store = OperationalStateStore(settings)
+    queue_service = JobQueueService(settings)
+
+    retry_source = asyncio.run(
+        store.create_job_request(
+            requested_by="ops-ana",
+            ticket_id="GLPI-LOCAL-500",
+            automation_name="noop.healthcheck",
+            payload_json={"request": {"reason": "Retry para resumo", "parameters": {}}},
+        )
+    )
+    retry_acquired = asyncio.run(
+        store.acquire_job_for_execution(
+            retry_source.job_id,
+            worker_id="summary-retry-worker",
+            queue_mode="memory",
+            queue_key="helpdesk:automation:jobs",
+        )
+    )
+    assert retry_acquired is not None
+    scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=90)
+    retry_scheduled = asyncio.run(
+        store.mark_job_for_retry(
+            retry_source.job_id,
+            worker_id="summary-retry-worker",
+            error_type="ValueError",
+            error_message="Falha controlada para resumo.",
+            retry_scheduled_at=scheduled_at,
+            retry_delay_seconds=90,
+        )
+    )
+    assert retry_scheduled is not None
+
+    running_source = asyncio.run(
+        store.create_job_request(
+            requested_by="ops-ana",
+            ticket_id="GLPI-LOCAL-501",
+            automation_name="noop.healthcheck",
+            payload_json={"request": {"reason": "Running para resumo", "parameters": {}}},
+        )
+    )
+    running_job = asyncio.run(
+        store.acquire_job_for_execution(
+            running_source.job_id,
+            worker_id="summary-running-worker",
+            queue_mode="memory",
+            queue_key="helpdesk:automation:jobs",
+        )
+    )
+    assert running_job is not None
+
+    dead_letter_source = asyncio.run(
+        store.create_job_request(
+            requested_by="ops-ana",
+            ticket_id="GLPI-LOCAL-502",
+            automation_name="noop.healthcheck",
+            payload_json={"request": {"reason": "Dead-letter para resumo", "parameters": {}}},
+        )
+    )
+    dead_letter_acquired = asyncio.run(
+        store.acquire_job_for_execution(
+            dead_letter_source.job_id,
+            worker_id="summary-dead-worker",
+            queue_mode="memory",
+            queue_key="helpdesk:automation:jobs",
+        )
+    )
+    assert dead_letter_acquired is not None
+    dead_letter_job = asyncio.run(
+        store.mark_job_dead_letter(
+            dead_letter_source.job_id,
+            worker_id="summary-dead-worker",
+            queue_mode="memory",
+            queue_key="helpdesk:automation:jobs:dead-letter",
+            error_type="RuntimeError",
+            error_message="Falha terminal controlada para resumo.",
+        )
+    )
+    assert dead_letter_job is not None
+    dead_letter_enqueue = asyncio.run(
+        queue_service.enqueue_job(dead_letter_source.job_id, dead_letter=True)
+    )
+    assert dead_letter_enqueue.queue_mode == "memory"
+
+    summary_response = client.get(
+        "/api/v1/helpdesk/automation/summary",
+        headers=AUTOMATION_READ_HEADERS,
+    )
+
+    assert summary_response.status_code == 200
+    body = summary_response.json()
+    assert body["storage_mode"] == "memory"
+    assert body["queue_mode"] == "memory"
+    assert body["approval_timeout_minutes"] == settings.automation_approval_timeout_minutes
+    assert body["total_jobs"] == 5
+    assert body["approval_status_counts"] == {
+        "pending": 1,
+        "approved": 4,
+        "rejected": 0,
+    }
+    assert body["execution_status_counts"]["awaiting-approval"] == 1
+    assert body["execution_status_counts"]["queued"] == 1
+    assert body["execution_status_counts"]["running"] == 1
+    assert body["execution_status_counts"]["retry-scheduled"] == 1
+    assert body["execution_status_counts"]["dead-letter"] == 1
+    assert body["queue_depth"] == 1
+    assert body["dead_letter_queue_depth"] == 1
+    assert body["oldest_job_created_at"] is not None
+    assert body["oldest_pending_approval_started_at"] is not None
+    assert body["oldest_pending_approval_expires_at"] is not None
+    assert body["oldest_queued_job_created_at"] is not None
+    assert body["oldest_running_started_at"] is not None
+    assert body["oldest_retry_scheduled_at"] == scheduled_at.isoformat()
+
+
+def test_ticket_bound_automation_job_requires_ticket_id() -> None:
+    response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "ansible.ticket_context_probe",
+            "reason": "Probe sem ticket nao deve entrar na fila",
+            "parameters": {"context_label": "diagnostico"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "ticket_id" in response.json()["detail"]
+
+
+def test_create_ticket_bound_automation_job_accepts_context_label() -> None:
+    ticket_response = client.post(
+        "/api/v1/helpdesk/tickets/open",
+        json={
+            "subject": "Chamado para probe runner",
+            "description": "Chamado de teste para validar automacao homologada vinculada a ticket.",
+            "requester": {
+                "external_id": "user-api-probe",
+                "display_name": "Usuario API Probe",
+                "phone_number": "+5511911102222",
+                "role": "user",
+            },
+        },
+    )
+    ticket_id = ticket_response.json()["ticket_id"]
+
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "ansible.ticket_context_probe",
+            "ticket_id": ticket_id,
+            "reason": "Probe vinculado ao ticket",
+            "parameters": {"context_label": "diagnostico"},
+        },
+    )
+
+    assert create_response.status_code == 202
+    body = create_response.json()
+    assert body["automation_name"] == "ansible.ticket_context_probe"
+    assert body["ticket_id"] == ticket_id
+    assert body["risk_level"] == "moderate"
+    assert body["approval_mode"] == "manual"
+    assert body["approval_required"] is True
+    assert body["approval_status"] == "pending"
+    assert body["approval_acted_by"] is None
+    assert body["approval_reason_code"] is None
+    assert body["approval_reason"] is None
+    assert body["approval_updated_at"] is None
+    assert body["payload_json"]["request"]["parameters"]["context_label"] == "diagnostico"
+    assert body["execution_status"] == "awaiting-approval"
+    assert body["queue_mode"] is None
+
+    list_response = client.get(
+        "/api/v1/helpdesk/automation/jobs?approval_status=pending&execution_status=awaiting-approval",
+        headers=AUTOMATION_READ_HEADERS,
+    )
+
+    assert list_response.status_code == 200
+    assert any(job["job_id"] == body["job_id"] for job in list_response.json()["jobs"])
+
+
+def test_approve_ticket_bound_automation_job_enqueues_after_manual_approval() -> None:
+    ticket_response = client.post(
+        "/api/v1/helpdesk/tickets/open",
+        json={
+            "subject": "Chamado aguardando aprovacao",
+            "description": "Chamado de teste para liberar a automacao homologada apos revisao.",
+            "requester": {
+                "external_id": "user-approval-probe",
+                "display_name": "Usuario Approval Probe",
+                "phone_number": "+5511912203344",
+                "role": "user",
+            },
+        },
+    )
+    ticket_id = ticket_response.json()["ticket_id"]
+
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "ansible.ticket_context_probe",
+            "ticket_id": ticket_id,
+            "reason": "Diagnostico read-only do chamado",
+            "parameters": {"context_label": "janela-controlada"},
+        },
+    )
+    job_id = create_response.json()["job_id"]
+
+    approve_response = client.post(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}/approve",
+        headers=AUTOMATION_APPROVAL_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "read_only_diagnostic_authorized",
+        },
+    )
+
+    assert approve_response.status_code == 200
+    body = approve_response.json()
+    assert body["job_id"] == job_id
+    assert body["approval_status"] == "approved"
+    assert body["approval_acted_by"] == "supervisor-ana"
+    assert body["approval_reason_code"] == "read_only_diagnostic_authorized"
+    assert body["approval_reason"] == "Diagnostico read-only autorizado."
+    assert body["approval_updated_at"] is not None
+    assert body["execution_status"] == "queued"
+    assert body["queue_mode"] == "memory"
+
+
+def test_cancel_queued_automation_job_removes_it_from_execution_window() -> None:
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "noop.healthcheck",
+            "reason": "Cancelar antes da execucao efetiva",
+        },
+    )
+
+    assert create_response.status_code == 202
+    job_id = create_response.json()["job_id"]
+
+    cancel_response = client.post(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}/cancel",
+        headers=AUTOMATION_APPROVAL_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "change_revoked",
+        },
+    )
+    detail_response = client.get(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}",
+        headers=AUTOMATION_READ_HEADERS,
+    )
+
+    assert cancel_response.status_code == 200
+    body = cancel_response.json()
+    assert body["approval_status"] == "approved"
+    assert body["execution_status"] == "cancelled"
+    assert body["cancelled_by"] == "supervisor-ana"
+    assert body["cancellation_reason_code"] == "change_revoked"
+    assert body["cancellation_reason"] == "Mudanca revogada antes da execucao."
+    assert body["cancelled_at"] is not None
+    assert body["queue_mode"] == "memory"
+
+    assert detail_response.status_code == 200
+    detail_body = detail_response.json()
+    assert detail_body["execution_status"] == "cancelled"
+    assert detail_body["cancelled_by"] == "supervisor-ana"
+    assert detail_body["cancellation_reason_code"] == "change_revoked"
+
+    events = [
+        event
+        for event in get_memory_audit_events()
+        if event.event_type == "automation_job_cancelled"
+    ]
+    assert events
+    assert events[-1].payload_json["job_id"] == job_id
+    assert events[-1].payload_json["previous_execution_status"] == "queued"
+
+
+def test_cancel_route_rejects_pending_manual_job() -> None:
+    ticket_response = client.post(
+        "/api/v1/helpdesk/tickets/open",
+        json={
+            "subject": "Chamado pendente para cancelamento invalido",
+            "description": "Jobs aguardando aprovacao devem continuar usando reject.",
+            "requester": {
+                "external_id": "user-cancel-pending",
+                "display_name": "Usuario Cancel Pending",
+                "phone_number": "+5511913306677",
+                "role": "user",
+            },
+        },
+    )
+    job_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "glpi.ticket_snapshot",
+            "ticket_id": ticket_response.json()["ticket_id"],
+            "reason": "Pendente de aprovacao normal",
+        },
+    )
+    job_id = job_response.json()["job_id"]
+
+    cancel_response = client.post(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}/cancel",
+        headers=AUTOMATION_APPROVAL_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "change_revoked",
+        },
+    )
+
+    assert cancel_response.status_code == 400
+    assert "nao pode ser cancelado" in cancel_response.json()["detail"].lower()
+
+
+def test_cancel_route_accepts_retry_scheduled_job() -> None:
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "noop.healthcheck",
+            "reason": "Preparar retry para cancelamento",
+        },
+    )
+    job_id = create_response.json()["job_id"]
+
+    store = OperationalStateStore(get_settings())
+    acquired = asyncio.run(
+        store.acquire_job_for_execution(
+            job_id,
+            worker_id="cancel-retry-worker",
+            queue_mode="memory",
+            queue_key="helpdesk:automation:jobs",
+        )
+    )
+    assert acquired is not None
+    retried = asyncio.run(
+        store.mark_job_for_retry(
+            job_id,
+            worker_id="cancel-retry-worker",
+            error_type="ValueError",
+            error_message="Falha controlada antes do cancelamento.",
+            retry_scheduled_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            retry_delay_seconds=60,
+        )
+    )
+    assert retried is not None
+
+    cancel_response = client.post(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}/cancel",
+        headers=AUTOMATION_APPROVAL_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "scope_changed",
+        },
+    )
+
+    assert cancel_response.status_code == 200
+    body = cancel_response.json()
+    assert body["execution_status"] == "cancelled"
+    assert body["cancelled_by"] == "supervisor-ana"
+    assert body["cancellation_reason_code"] == "scope_changed"
+    assert body["cancellation_reason"] == "Escopo mudou antes da execucao."
+    assert body["last_error"] == "Falha controlada antes do cancelamento."
+
+
+def test_stale_pending_automation_job_is_expired_before_manual_approval() -> None:
+    settings = get_settings()
+    original_timeout = settings.automation_approval_timeout_minutes
+    settings.automation_approval_timeout_minutes = 1
+
+    try:
+        ticket_response = client.post(
+            "/api/v1/helpdesk/tickets/open",
+            json={
+                "subject": "Chamado com aprovacao vencida",
+                "description": "Valida expiracao automatica de jobs aguardando revisao.",
+                "requester": {
+                    "external_id": "user-expired-approval",
+                    "display_name": "Usuario Approval Expired",
+                    "phone_number": "+5511912209900",
+                    "role": "user",
+                },
+            },
+        )
+        ticket_id = ticket_response.json()["ticket_id"]
+
+        create_response = client.post(
+            "/api/v1/helpdesk/automation/jobs",
+            headers=AUTOMATION_HEADERS,
+            json={
+                "requested_by": "ops-ana",
+                "automation_name": "glpi.ticket_snapshot",
+                "ticket_id": ticket_id,
+                "reason": "Job aguardando revisao fora da janela",
+            },
+        )
+        job_id = create_response.json()["job_id"]
+
+        stale_timestamp = datetime.now(timezone.utc) - timedelta(minutes=5)
+        operational_store_module._MEMORY_JOB_REQUESTS[job_id].created_at = stale_timestamp
+
+        approve_response = client.post(
+            f"/api/v1/helpdesk/automation/jobs/{job_id}/approve",
+            headers=AUTOMATION_APPROVAL_HEADERS,
+            json={
+                "acted_by": "supervisor-ana",
+                "reason_code": "change_window_validated",
+            },
+        )
+        detail_response = client.get(
+            f"/api/v1/helpdesk/automation/jobs/{job_id}",
+            headers=AUTOMATION_READ_HEADERS,
+        )
+    finally:
+        settings.automation_approval_timeout_minutes = original_timeout
+
+    assert approve_response.status_code == 400
+    assert "rejected/rejected" in approve_response.json()["detail"]
+
+    assert detail_response.status_code == 200
+    body = detail_response.json()
+    assert body["approval_status"] == "rejected"
+    assert body["execution_status"] == "rejected"
+    assert body["approval_acted_by"] == "system-approval-expiration"
+    assert body["approval_reason_code"] == "approval_timeout_expired"
+    assert "expirada automaticamente" in body["approval_reason"].lower()
+
+    events = [
+        event
+        for event in get_memory_audit_events()
+        if event.event_type == "automation_job_approval_expired"
+    ]
+    assert len(events) == 1
+    assert events[0].payload_json["job_id"] == job_id
+
+
+def test_get_automation_job_exposes_retry_schedule_metadata() -> None:
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "noop.healthcheck",
+            "reason": "Preparar job para retry agendado",
+        },
+    )
+
+    assert create_response.status_code == 202
+    job_id = create_response.json()["job_id"]
+
+    store = OperationalStateStore(get_settings())
+    acquired = asyncio.run(
+        store.acquire_job_for_execution(
+            job_id,
+            worker_id="retry-metadata-worker",
+            queue_mode="memory",
+            queue_key="helpdesk:automation:jobs",
+        )
+    )
+    assert acquired is not None
+
+    scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=45)
+    retried = asyncio.run(
+        store.mark_job_for_retry(
+            job_id,
+            worker_id="retry-metadata-worker",
+            error_type="ValueError",
+            error_message="Falha controlada para validar resposta.",
+            retry_scheduled_at=scheduled_at,
+            retry_delay_seconds=45,
+        )
+    )
+    assert retried is not None
+
+    detail_response = client.get(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}",
+        headers=AUTOMATION_READ_HEADERS,
+    )
+
+    assert detail_response.status_code == 200
+    body = detail_response.json()
+    assert body["execution_status"] == "retry-scheduled"
+    assert body["retry_scheduled_at"] == scheduled_at.isoformat()
+    assert body["retry_delay_seconds"] == 45
+    assert body["last_error"] == "Falha controlada para validar resposta."
+
+
+def test_reject_manual_automation_job_marks_job_as_rejected() -> None:
+    ticket_response = client.post(
+        "/api/v1/helpdesk/tickets/open",
+        json={
+            "subject": "Chamado para rejeicao",
+            "description": "Chamado de teste para validar rejeicao explicita da automacao.",
+            "requester": {
+                "external_id": "user-reject-probe",
+                "display_name": "Usuario Reject Probe",
+                "phone_number": "+5511912205566",
+                "role": "user",
+            },
+        },
+    )
+    ticket_id = ticket_response.json()["ticket_id"]
+
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "glpi.ticket_snapshot",
+            "ticket_id": ticket_id,
+            "reason": "Snapshot operacional pendente de revisao",
+        },
+    )
+    job_id = create_response.json()["job_id"]
+
+    reject_response = client.post(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}/reject",
+        headers=AUTOMATION_APPROVAL_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "outside_change_window",
+        },
+    )
+
+    assert reject_response.status_code == 200
+    body = reject_response.json()
+    assert body["job_id"] == job_id
+    assert body["approval_status"] == "rejected"
+    assert body["approval_acted_by"] == "supervisor-ana"
+    assert body["approval_reason_code"] == "outside_change_window"
+    assert body["approval_reason"] == "Ticket fora da janela de atendimento autorizada."
+    assert body["execution_status"] == "rejected"
+    assert body["queue_mode"] is None
+
+
+def test_approve_route_rejects_auto_approved_job() -> None:
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "noop.healthcheck",
+            "reason": "Smoke test low-risk",
+        },
+    )
+    job_id = create_response.json()["job_id"]
+
+    approve_response = client.post(
+        f"/api/v1/helpdesk/automation/jobs/{job_id}/approve",
+        headers=AUTOMATION_APPROVAL_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "change_window_validated",
+        },
+    )
+
+    assert approve_response.status_code == 400
+    assert "nao esta aguardando aprovacao" in approve_response.json()["detail"].lower()
+
+
+def test_approve_route_rejects_non_allowlisted_reason_code() -> None:
+    ticket_response = client.post(
+        "/api/v1/helpdesk/tickets/open",
+        json={
+            "subject": "Chamado para validar reason_code",
+            "description": "Aprovacao deve bloquear reason_code fora da allowlist.",
+            "requester": {
+                "external_id": "user-invalid-reason-code",
+                "display_name": "Usuario Invalid Reason Code",
+                "phone_number": "+5511913317788",
+                "role": "user",
+            },
+        },
+    )
+    create_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "glpi.ticket_snapshot",
+            "ticket_id": ticket_response.json()["ticket_id"],
+            "reason": "Validar allowlist de motivos",
+        },
+    )
+
+    approve_response = client.post(
+        f"/api/v1/helpdesk/automation/jobs/{create_response.json()['job_id']}/approve",
+        headers=AUTOMATION_APPROVAL_HEADERS,
+        json={
+            "acted_by": "supervisor-ana",
+            "reason_code": "free_text_not_allowed",
+        },
+    )
+
+    assert approve_response.status_code == 400
+    assert "reason_code invalido" in approve_response.json()["detail"].lower()
 
 
 def test_open_ticket_works_in_mock_mode() -> None:
@@ -115,6 +1051,54 @@ def test_get_ticket_returns_local_mock_ticket() -> None:
     assert body["subject"] == create_payload["subject"]
     assert body["status"] == "queued-local"
     assert body["integration_mode"] == "mock"
+
+
+def test_audit_events_endpoint_lists_recent_events_without_sensitive_text() -> None:
+    payload = {
+        "subject": "Falha de acesso ao GLPI",
+        "description": "Usuário relata que não consegue autenticar no portal do GLPI.",
+        "category": "acesso",
+        "asset_name": "glpi-web-01",
+        "service_name": "glpi",
+        "priority": "high",
+        "requester": {
+            "external_id": "user-audit-123",
+            "display_name": "Maria Santos",
+            "phone_number": "+5521997775269",
+            "role": "user",
+        },
+    }
+
+    create_response = client.post("/api/v1/helpdesk/tickets/open", json=payload)
+    ticket_id = create_response.json()["ticket_id"]
+
+    response = client.get(
+        f"/api/v1/helpdesk/audit/events?event_type=ticket_opened&ticket_id={ticket_id}",
+        headers=AUDIT_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["storage_mode"] == "memory"
+    assert body["retention_days"] == 30
+    assert body["applied_filters"] == {
+        "event_type": "ticket_opened",
+        "ticket_id": ticket_id,
+    }
+    assert len(body["events"]) == 1
+    event = body["events"][0]
+    assert event["event_type"] == "ticket_opened"
+    assert event["ticket_id"] == ticket_id
+    assert event["source_channel"] == "api"
+    assert event["payload_json"]["category"] == "acesso"
+    assert event["payload_json"]["asset_name"] == "glpi-web-01"
+    assert event["payload_json"]["service_name"] == "glpi"
+    assert event["payload_json"]["glpi_external_id"].startswith("helpdesk-api-")
+    assert event["payload_json"]["glpi_request_type_id"] == 4
+    assert event["payload_json"]["glpi_request_type_name"] == "Direct"
+    assert "subject" not in event["payload_json"]
+    assert "description" not in event["payload_json"]
+    assert any("fallback em memoria" in note.lower() for note in body["notes"])
 
 
 def test_triage_endpoint_suggests_queue_and_next_steps() -> None:

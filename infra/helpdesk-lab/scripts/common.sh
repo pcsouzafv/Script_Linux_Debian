@@ -50,6 +50,10 @@ escape_sed_replacement() {
     printf '%s' "$1" | sed -e 's/[\\/&]/\\&/g'
 }
 
+urlencode() {
+    jq -rn --arg value "$1" '$value|@uri'
+}
+
 upsert_env_key() {
     local file="$1"
     local key="$2"
