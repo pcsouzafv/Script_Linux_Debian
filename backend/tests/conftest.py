@@ -5,6 +5,7 @@ from app.services.glpi import MOCK_TICKET_STORE
 from app.services.intake import clear_user_intake_sessions
 from app.services.job_queue import clear_memory_job_queue
 from app.services.operational_store import clear_memory_operational_state
+from app.services.ticket_analytics_store import clear_memory_ticket_analytics
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +119,7 @@ def isolate_test_settings() -> None:
     clear_user_intake_sessions()
     clear_memory_operational_state()
     clear_memory_job_queue()
+    clear_memory_ticket_analytics()
     MOCK_TICKET_STORE.clear()
 
     yield
@@ -125,6 +127,7 @@ def isolate_test_settings() -> None:
     clear_user_intake_sessions()
     clear_memory_operational_state()
     clear_memory_job_queue()
+    clear_memory_ticket_analytics()
     MOCK_TICKET_STORE.clear()
     for key, value in original_values.items():
         setattr(settings, key, value)

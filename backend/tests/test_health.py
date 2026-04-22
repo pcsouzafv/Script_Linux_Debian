@@ -1868,6 +1868,8 @@ def test_technician_ticket_command_reads_existing_ticket() -> None:
     assert body["outcome_type"] == "command"
     assert body["command_result"]["command_name"] == "ticket"
     assert body["command_result"]["ticket"]["ticket_id"] == ticket_id
+    assert body["command_result"]["resolution_advice"]["ticket_id"] == ticket_id
+    assert "Sugestao:" in body["command_result"]["reply_text"]
 
 
 def test_technician_comment_command_adds_followup() -> None:
@@ -1901,6 +1903,9 @@ def test_technician_comment_command_adds_followup() -> None:
     body = response.json()
     assert body["command_result"]["command_name"] == "comment"
     assert body["command_result"]["ticket"]["followup_count"] == 1
+    assert body["command_result"]["resolution_advice"]["ticket_id"] == ticket_id
+    assert body["command_result"]["resolution_advice"]["recent_entries"][0]["source"] == "followup"
+    assert "Sugestao:" in body["command_result"]["reply_text"]
 
 
 def test_technician_comment_command_notifies_requester() -> None:
@@ -1969,6 +1974,48 @@ def test_technician_status_command_updates_allowed_status() -> None:
     body = response.json()
     assert body["command_result"]["command_name"] == "status"
     assert body["command_result"]["ticket"]["status"] == "processing"
+    assert body["command_result"]["resolution_advice"]["ticket_id"] == ticket_id
+    assert "Sugestao:" in body["command_result"]["reply_text"]
+
+
+def test_technician_status_solved_records_solution_and_notifies_requester() -> None:
+    create_payload = {
+        "subject": "ERP indisponivel para o financeiro",
+        "description": "Usuarios do financeiro relatam falha ao autenticar.",
+        "category": "acesso",
+        "asset_name": "erp-fin-01",
+        "service_name": "erp",
+        "priority": "high",
+        "requester": {
+            "external_id": "user-carlos-lima",
+            "display_name": "Carlos Lima",
+            "phone_number": "+5511977776666",
+            "role": "user",
+            "glpi_user_id": 102,
+        },
+    }
+    ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=create_payload).json()["ticket_id"]
+
+    response = client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5511912345678",
+            "sender_name": "Ana Souza",
+            "text": f"/status {ticket_id} solved",
+            "requester_role": "user",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["command_result"]["command_name"] == "status"
+    assert body["command_result"]["ticket"]["status"] == "solved"
+    assert body["command_result"]["resolution_advice"]["ticket_id"] == ticket_id
+    assert body["command_result"]["resolution_advice"]["recent_entries"][0]["source"] == "solution"
+    assert "atualizacao enviada ao solicitante" in body["command_result"]["reply_text"].lower()
+    assert any("+5511977776666" in note for note in body["notes"])
+    assert len(MOCK_TICKET_STORE[ticket_id].solutions) == 1
+    assert "Resumo da resolucao:" in MOCK_TICKET_STORE[ticket_id].solutions[0]["content"]
 
 
 def test_technician_status_command_denies_closed_status() -> None:

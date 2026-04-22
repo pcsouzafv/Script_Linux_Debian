@@ -31,6 +31,7 @@ from app.schemas.helpdesk import (
     IdentityLookupResponse,
     LLMStatusResponse,
     NormalizedWhatsAppMessage,
+    TicketResolutionAdviceResponse,
     TicketTriageRequest,
     TicketTriageResponse,
     TicketDetailsResponse,
@@ -292,6 +293,18 @@ async def generate_with_llm(
         content=result.content,
         notes=result.notes,
     )
+
+
+@router.get(
+    "/helpdesk/ai/tickets/{ticket_id}/resolution",
+    response_model=TicketResolutionAdviceResponse,
+    dependencies=protected_dependencies,
+)
+async def advise_ticket_resolution(
+    ticket_id: str,
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> TicketResolutionAdviceResponse:
+    return await orchestrator.advise_ticket_resolution(ticket_id)
 
 
 @router.get("/webhooks/whatsapp/verify", include_in_schema=False)

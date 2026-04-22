@@ -55,6 +55,10 @@ class TicketAnalyticsSnapshotListResult:
 _MEMORY_TICKET_ANALYTICS: dict[str, TicketAnalyticsSnapshotRecord] = {}
 
 
+def clear_memory_ticket_analytics() -> None:
+    _MEMORY_TICKET_ANALYTICS.clear()
+
+
 class TicketAnalyticsStore:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings

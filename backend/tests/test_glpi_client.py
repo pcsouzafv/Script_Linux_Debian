@@ -461,6 +461,121 @@ def test_get_ticket_analytics_details_resolves_category_name_by_id_when_label_mi
     assert details.category_name == "Acesso"
 
 
+def test_get_ticket_resolution_context_parses_followups_and_solutions(monkeypatch) -> None:
+    responses = {
+        "http://127.0.0.1:8088/apirest.php/Ticket/20/ITILSolution/": [
+            {
+                "content": "Senha sincronizada no AD e validada com o usuario.",
+                "date_creation": "2026-04-20 09:15:00",
+                "users_id": 12,
+            }
+        ],
+        "http://127.0.0.1:8088/apirest.php/Ticket/20/ITILFollowup/": [
+            {
+                "content": "Usuario confirmou que o erro ocorre apenas no ERP web.",
+                "date_creation": "2026-04-20 08:55:00",
+                "users_id": 9,
+            }
+        ],
+    }
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def get(self, url: str, headers: dict | None = None, params: list[tuple[str, str]] | None = None):
+            return _FakeResponse(responses[url])
+
+    monkeypatch.setattr("app.services.glpi.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(GLPIClient, "_open_session", lambda self: asyncio.sleep(0, result="session-token"))
+    monkeypatch.setattr(GLPIClient, "_close_session", lambda self, session_token: asyncio.sleep(0))
+
+    client = GLPIClient(
+        Settings(
+            _env_file=None,
+            glpi_base_url="http://127.0.0.1:8088/apirest.php",
+            glpi_username="glpi",
+            glpi_password="glpi",
+        )
+    )
+
+    context = asyncio.run(client.get_ticket_resolution_context("20", limit=5))
+
+    assert context.mode == "live"
+    assert [entry.source for entry in context.entries] == ["solution", "followup"]
+    assert context.entries[0].author_glpi_user_id == 12
+    assert "Senha sincronizada" in context.entries[0].content
+
+
+def test_add_ticket_solution_posts_itilsolution_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {"posts": []}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def post(self, url: str, headers: dict | None = None, json: dict | None = None):
+            captured["posts"].append({"url": url, "json": json or {}})
+            return _FakeResponse({"id": 99})
+
+        async def get(self, url: str, headers: dict | None = None, params: list[tuple[str, str]] | None = None):
+            return _FakeResponse(
+                {
+                    "id": 42,
+                    "name": "Chamado resolvido",
+                    "status": 5,
+                    "priority": 3,
+                    "date_mod": "2026-04-21 11:00:00",
+                    "_users_id_requester": [{"users_id": 7}],
+                    "_users_id_assign": [{"users_id": 9}],
+                }
+            )
+
+    monkeypatch.setattr("app.services.glpi.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(GLPIClient, "_open_session", lambda self: asyncio.sleep(0, result="session-token"))
+    monkeypatch.setattr(GLPIClient, "_close_session", lambda self, session_token: asyncio.sleep(0))
+
+    client = GLPIClient(
+        Settings(
+            _env_file=None,
+            glpi_base_url="http://127.0.0.1:8088/apirest.php",
+            glpi_username="glpi",
+            glpi_password="glpi",
+        )
+    )
+
+    result = asyncio.run(
+        client.add_ticket_solution(
+            "42",
+            "Resumo da resolucao: validacao concluida.",
+            author_glpi_user_id=9,
+        )
+    )
+
+    assert captured["posts"][0]["url"].endswith("/ITILSolution/")
+    assert captured["posts"][0]["json"] == {
+        "input": {
+            "itemtype": "Ticket",
+            "items_id": 42,
+            "content": "Resumo da resolucao: validacao concluida.",
+            "users_id": 9,
+        }
+    }
+    assert result.ticket.status == "solved"
+
+
 def test_apply_ticket_analytics_patch_updates_ticket_and_links_item(monkeypatch) -> None:
     captured: dict[str, object] = {
         "puts": [],

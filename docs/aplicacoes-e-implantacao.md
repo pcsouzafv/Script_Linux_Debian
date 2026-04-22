@@ -109,6 +109,9 @@ Acrescentar a camada de triagem e assistencia.
 Leitura pratica do status:
 
 - triagem e enriquecimento inicial ja existem;
+- assistencia de resolucao por ticket agora combina snapshot analitico, followups/solutions do GLPI e sugestoes seguras via IA em `GET /api/v1/helpdesk/ai/tickets/{ticket_id}/resolution`;
+- interacoes operacionais por `/ticket`, `/comment` e `/status` agora podem devolver `resolution_advice` com resumo e primeira acao sugerida;
+- quando um ticket e marcado como `solved`, o backend ja pode registrar uma `solution` estruturada no GLPI e reutilizar esse historico nas proximas recomendacoes da IA;
 - banco operacional, auditoria duravel e snapshot analitico ja existem;
 - fila operacional e retry persistido ja existem;
 - ainda faltam a camada real de conhecimento, indexacao, agentes de resumo/classificacao e relatorios operacionais mais completos.

@@ -106,6 +106,9 @@ Plataforma operando como camada de apoio real para service desk e infraestrutura
 Situação observada hoje:
 
 - parte da base já existe via auditoria durável, snapshot analítico e trilha operacional;
+- a plataforma já entrega assistência de resolução por ticket usando histórico do GLPI, snapshot analítico e IA para sugerir próximos passos seguros;
+- comandos operacionais de consulta e atualização de ticket já conseguem devolver recomendações resumidas por recorrência e contexto recente;
+- mudanças para `solved` já podem consolidar uma `solution` estruturada no GLPI, retroalimentando o histórico que a IA consulta depois;
 - ainda faltam relatórios operacionais completos, detecção de incidentes em massa, pós-mortem semi-automático e recomendações por recorrência.
 
 ## Backlog priorizado

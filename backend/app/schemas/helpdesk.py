@@ -106,6 +106,30 @@ class LLMGenerateResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class TicketResolutionEntryResponse(BaseModel):
+    source: str
+    content: str
+    created_at: str | None = None
+    author_glpi_user_id: int | None = None
+
+
+class TicketResolutionAdviceResponse(BaseModel):
+    ticket_id: str
+    subject: str
+    status: str
+    priority: str | None = None
+    category_name: str | None = None
+    service_name: str | None = None
+    routed_to: str | None = None
+    integration_mode: str
+    summary: str
+    suggested_actions: list[str] = Field(default_factory=list)
+    resolution_hints: list[str] = Field(default_factory=list)
+    similar_incidents: list[str] = Field(default_factory=list)
+    recent_entries: list[TicketResolutionEntryResponse] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class TicketTriageRequest(BaseModel):
     subject: str = Field(..., min_length=5, max_length=200)
     description: str = Field(..., min_length=10)
@@ -126,6 +150,8 @@ class TicketTriageResponse(BaseModel):
     confidence: str
     summary: str
     next_steps: list[str] = Field(default_factory=list)
+    resolution_hints: list[str] = Field(default_factory=list)
+    similar_incidents: list[str] = Field(default_factory=list)
     mode: str
     notes: list[str] = Field(default_factory=list)
 
@@ -288,6 +314,7 @@ class TechnicianCommandResponse(BaseModel):
     ticket: TicketDetailsResponse | None = None
     opened_ticket: TicketOpenResponse | None = None
     correlation: CorrelationResponse | None = None
+    resolution_advice: TicketResolutionAdviceResponse | None = None
     notes: list[str] = Field(default_factory=list)
 
 

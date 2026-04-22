@@ -42,6 +42,7 @@ class MockTicketRecord:
     linked_item_id: int | None = None
     linked_item_name: str | None = None
     followups: list[dict[str, object]] = field(default_factory=list)
+    solutions: list[dict[str, object]] = field(default_factory=list)
 
 
 MOCK_TICKET_STORE: dict[str, MockTicketRecord] = {}
@@ -110,6 +111,22 @@ class GLPITicketAnalyticsDetails:
 
 
 @dataclass(slots=True)
+class GLPITicketResolutionEntry:
+    source: str
+    content: str
+    created_at: str | None
+    author_glpi_user_id: int | None
+
+
+@dataclass(slots=True)
+class GLPITicketResolutionContext:
+    ticket_id: str
+    mode: str
+    entries: list[GLPITicketResolutionEntry]
+    notes: list[str]
+
+
+@dataclass(slots=True)
 class GLPITicketMutationResult:
     ticket: GLPITicketDetails
     mode: str
@@ -160,6 +177,7 @@ class GLPIClient:
                 request_type_name=request_type_name,
                 category_name=ticket.category,
                 followups=[],
+                solutions=[],
             )
             notes = ["GLPI não configurado; ticket criado em modo mock."]
             if ticket.requester.glpi_user_id:
@@ -673,6 +691,97 @@ class GLPIClient:
         finally:
             await self._close_session(session_token)
 
+    async def get_ticket_resolution_context(
+        self,
+        ticket_id: str,
+        *,
+        limit: int = 6,
+    ) -> GLPITicketResolutionContext:
+        normalized_limit = max(1, min(limit, 10))
+
+        if not self.configured:
+            mock_ticket = self._get_mock_ticket(ticket_id)
+            entries = [
+                entry
+                for entry in (
+                    self._parse_resolution_entry(item, source="solution")
+                    for item in mock_ticket.solutions
+                )
+                if entry is not None
+            ]
+            entries.extend(
+                entry
+                for entry in (
+                    self._parse_resolution_entry(item, source="followup")
+                    for item in mock_ticket.followups
+                )
+                if entry is not None
+            )
+            entries.sort(
+                key=lambda item: (item.created_at or "", item.source),
+                reverse=True,
+            )
+            return GLPITicketResolutionContext(
+                ticket_id=mock_ticket.ticket_id,
+                mode="mock",
+                entries=entries[:normalized_limit],
+                notes=["Contexto de resolução consultado no armazenamento mock local."],
+            )
+
+        session_token = await self._open_session()
+        try:
+            entries: list[GLPITicketResolutionEntry] = []
+            notes = ["Contexto de resolução consultado com sucesso no GLPI."]
+
+            try:
+                solution_rows = await self._load_ticket_related_collection(
+                    ticket_id=ticket_id,
+                    resource_name="ITILSolution",
+                    session_token=session_token,
+                )
+            except IntegrationError as exc:
+                solution_rows = []
+                notes.append(f"Falha ao consultar solutions do GLPI: {exc}")
+
+            try:
+                followup_rows = await self._load_ticket_related_collection(
+                    ticket_id=ticket_id,
+                    resource_name="ITILFollowup",
+                    session_token=session_token,
+                )
+            except IntegrationError as exc:
+                followup_rows = []
+                notes.append(f"Falha ao consultar followups do GLPI: {exc}")
+
+            entries.extend(
+                entry
+                for entry in (
+                    self._parse_resolution_entry(item, source="solution")
+                    for item in solution_rows
+                )
+                if entry is not None
+            )
+            entries.extend(
+                entry
+                for entry in (
+                    self._parse_resolution_entry(item, source="followup")
+                    for item in followup_rows
+                )
+                if entry is not None
+            )
+            entries.sort(
+                key=lambda item: (item.created_at or "", item.source),
+                reverse=True,
+            )
+            return GLPITicketResolutionContext(
+                ticket_id=str(ticket_id),
+                mode="live",
+                entries=entries[:normalized_limit],
+                notes=notes,
+            )
+        finally:
+            await self._close_session(session_token)
+
     async def resolve_category_by_name(self, category_name: str) -> GLPIResolvedCategory | None:
         if not self.configured:
             normalized_category_name = self._normalize_optional_text(category_name)
@@ -911,6 +1020,60 @@ class GLPIClient:
         notes = ["Comentário adicionado com sucesso ao ticket no GLPI."]
         if author_glpi_user_id:
             notes.append(f"Comentário associado ao usuário GLPI {author_glpi_user_id}.")
+        return GLPITicketMutationResult(ticket=ticket, mode="live", notes=notes)
+
+    async def add_ticket_solution(
+        self,
+        ticket_id: str,
+        content: str,
+        author_glpi_user_id: int | None = None,
+    ) -> GLPITicketMutationResult:
+        if not self.configured:
+            mock_ticket = self._get_mock_ticket(ticket_id)
+            mock_ticket.solutions.append(
+                {
+                    "content": content,
+                    "author_glpi_user_id": author_glpi_user_id,
+                    "created_at": self._timestamp(),
+                }
+            )
+            mock_ticket.updated_at = self._timestamp()
+            ticket = await self.get_ticket(ticket_id)
+            notes = ["Solution registrada localmente no ticket em modo mock."]
+            if author_glpi_user_id:
+                notes.append(f"Solution associada ao usuario GLPI {author_glpi_user_id}.")
+            return GLPITicketMutationResult(ticket=ticket, mode="mock", notes=notes)
+
+        session_token = await self._open_session()
+        try:
+            headers = self._session_headers(session_token, with_json_content_type=True)
+            payload = {
+                "input": {
+                    "itemtype": "Ticket",
+                    "items_id": self._coerce_live_id(ticket_id),
+                    "content": content,
+                }
+            }
+            if author_glpi_user_id:
+                payload["input"]["users_id"] = author_glpi_user_id
+
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    response = await client.post(
+                        f"{self._base_url()}/ITILSolution/",
+                        headers=headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise IntegrationError(f"Falha ao registrar solution no GLPI: {exc}") from exc
+        finally:
+            await self._close_session(session_token)
+
+        ticket = await self.get_ticket(ticket_id)
+        notes = ["Solution registrada com sucesso no ticket no GLPI."]
+        if author_glpi_user_id:
+            notes.append(f"Solution associada ao usuario GLPI {author_glpi_user_id}.")
         return GLPITicketMutationResult(ticket=ticket, mode="live", notes=notes)
 
     async def update_ticket_status(
@@ -1330,6 +1493,47 @@ class GLPIClient:
 
         return self._extract_ticket_user_actor_ids(data)
 
+    async def _load_ticket_related_collection(
+        self,
+        *,
+        ticket_id: str,
+        resource_name: str,
+        session_token: str,
+    ) -> list[dict[str, object]]:
+        headers = self._session_headers(session_token, with_json_content_type=True)
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.get(
+                    f"{self._base_url()}/Ticket/{ticket_id}/{resource_name}/",
+                    headers=headers,
+                )
+        except httpx.HTTPError as exc:
+            raise IntegrationError(
+                f"Falha ao consultar {resource_name} do ticket no GLPI: {exc}"
+            ) from exc
+
+        if response.status_code == 404:
+            return []
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise IntegrationError(
+                f"Falha ao consultar {resource_name} do ticket no GLPI: {exc}"
+            ) from exc
+
+        data = response.json()
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            for field_name in ("data", resource_name, resource_name.lower(), "items"):
+                field_value = data.get(field_name)
+                if isinstance(field_value, list):
+                    return [item for item in field_value if isinstance(item, dict)]
+            return [data]
+        return []
+
     async def _search_users(
         self,
         criteria: list[dict[str, object]],
@@ -1501,6 +1705,42 @@ class GLPIClient:
             if isinstance(field_value, list):
                 return len(field_value)
         return 0
+
+    def _parse_resolution_entry(
+        self,
+        row: dict[str, object],
+        *,
+        source: str,
+    ) -> GLPITicketResolutionEntry | None:
+        content = self._normalize_optional_text(
+            row.get("content")
+            or row.get("comment")
+            or row.get("solution")
+            or row.get("name")
+        )
+        if not content:
+            return None
+
+        created_at = self._normalize_optional_text(
+            row.get("date_creation")
+            or row.get("created_at")
+            or row.get("date")
+            or row.get("date_mod")
+            or row.get("solvedate")
+        )
+        author_glpi_user_id = self._normalize_int(
+            row.get("users_id")
+            or row.get("author_glpi_user_id")
+            or row.get("users_id_editor")
+            or row.get("users_id_recipient")
+        )
+        sanitized_content = " ".join(content.split())[:500]
+        return GLPITicketResolutionEntry(
+            source=source,
+            content=sanitized_content,
+            created_at=created_at,
+            author_glpi_user_id=author_glpi_user_id,
+        )
 
     def _parse_category_row(self, row: dict[str, object]) -> GLPIResolvedCategory | None:
         category_id = row.get("2") or row.get("id")

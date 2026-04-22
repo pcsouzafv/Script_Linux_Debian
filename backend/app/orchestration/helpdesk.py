@@ -19,6 +19,8 @@ from app.schemas.helpdesk import (
     TicketOpenRequest,
     TicketOpenResponse,
     TicketPriority,
+    TicketResolutionAdviceResponse,
+    TicketResolutionEntryResponse,
     TicketTriageRequest,
     TicketTriageResponse,
     UserRole,
@@ -31,7 +33,9 @@ from app.services.glpi import GLPIClient
 from app.services.identity import IdentityService
 from app.services.intake import UserIntakeOutcome, UserIntakeService, UserTicketOption
 from app.services.job_queue import JobQueueService
+from app.services.llm import LLMClient
 from app.services.operational_store import JobRequestRecord, OperationalStateStore
+from app.services.ticket_analytics_store import TicketAnalyticsStore
 from app.services.triage import TriageAgent, resolve_helpdesk_queue
 from app.services.whatsapp import WhatsAppClient
 from app.services.zabbix import ZabbixClient
@@ -98,21 +102,25 @@ class HelpdeskOrchestrator:
         glpi_client: GLPIClient,
         zabbix_client: ZabbixClient,
         whatsapp_client: WhatsAppClient,
+        llm_client: LLMClient,
         identity_service: IdentityService,
         automation_service: AutomationService,
         triage_agent: TriageAgent,
         user_intake_service: UserIntakeService,
         operational_store: OperationalStateStore,
+        analytics_store: TicketAnalyticsStore,
         job_queue: JobQueueService,
     ) -> None:
         self.glpi_client = glpi_client
         self.zabbix_client = zabbix_client
         self.whatsapp_client = whatsapp_client
+        self.llm_client = llm_client
         self.identity_service = identity_service
         self.automation_service = automation_service
         self.triage_agent = triage_agent
         self.user_intake_service = user_intake_service
         self.operational_store = operational_store
+        self.analytics_store = analytics_store
         self.job_queue = job_queue
 
     async def triage_ticket(self, payload: TicketTriageRequest) -> TicketTriageResponse:
@@ -161,6 +169,8 @@ class HelpdeskOrchestrator:
             *ticket_result.notes,
             f"Resumo de triagem: {triage.summary}",
             *(f"Próximo passo sugerido: {step}" for step in triage.next_steps),
+            *(f"Sugestao de resolucao: {hint}" for hint in triage.resolution_hints),
+            *(f"Caso similar recente: {incident}" for incident in triage.similar_incidents),
             f"Fila sugerida: {triage.suggested_queue}.",
         ]
 
@@ -931,6 +941,69 @@ class HelpdeskOrchestrator:
             notes=ticket.notes,
         )
 
+    async def advise_ticket_resolution(self, ticket_id: str) -> TicketResolutionAdviceResponse:
+        ticket = await self.glpi_client.get_ticket_analytics_details(ticket_id)
+        snapshot = await self.analytics_store.get_snapshot(ticket_id)
+        resolution_context = await self.glpi_client.get_ticket_resolution_context(ticket_id, limit=6)
+
+        triage = await self.triage_ticket(
+            TicketTriageRequest(
+                subject=ticket.subject,
+                description=ticket.description or ticket.subject,
+                current_category=(snapshot.category_name if snapshot else ticket.category_name),
+                current_priority=self._coerce_ticket_priority(ticket.priority),
+                asset_name=(snapshot.asset_name if snapshot else None),
+                service_name=(snapshot.service_name if snapshot else None),
+            )
+        )
+
+        summary = triage.summary
+        suggested_actions = self._build_resolution_actions(
+            triage=triage,
+            entries=resolution_context.entries,
+        )
+        llm_summary, llm_actions, llm_notes = await self._try_llm_resolution_assist(
+            ticket=ticket,
+            triage=triage,
+            snapshot=snapshot,
+            entries=resolution_context.entries,
+        )
+
+        notes = [
+            *ticket.notes,
+            *resolution_context.notes,
+            *triage.notes,
+            *llm_notes,
+        ]
+        if snapshot is None:
+            notes.append(
+                "Snapshot analitico nao encontrado para o ticket; usando somente GLPI e heuristicas locais."
+            )
+
+        if llm_summary or llm_actions:
+            summary = llm_summary or summary
+            suggested_actions = llm_actions or suggested_actions
+
+        return TicketResolutionAdviceResponse(
+            ticket_id=ticket.ticket_id,
+            subject=ticket.subject,
+            status=ticket.status,
+            priority=ticket.priority,
+            category_name=(snapshot.category_name if snapshot else ticket.category_name),
+            service_name=(snapshot.service_name if snapshot else None),
+            routed_to=(snapshot.routed_to if snapshot else triage.suggested_queue),
+            integration_mode=self._merge_modes(ticket.mode, resolution_context.mode),
+            summary=summary,
+            suggested_actions=suggested_actions,
+            resolution_hints=triage.resolution_hints,
+            similar_incidents=triage.similar_incidents,
+            recent_entries=[
+                self._to_ticket_resolution_entry_response(entry)
+                for entry in resolution_context.entries
+            ],
+            notes=notes,
+        )
+
     async def get_registered_identity(self, phone_number: str) -> IdentityLookupResponse:
         return await self.identity_service.get_registered_identity(phone_number)
 
@@ -1061,16 +1134,34 @@ class HelpdeskOrchestrator:
                     reply_text=f"Ticket {command_args.strip()} não encontrado.",
                     notes=["Consulta operacional retornou ticket inexistente."],
                 )
+
+            resolution_advice, resolution_notes = await self._safe_resolution_advice(
+                command_args.strip()
+            )
+
+            reply_text = (
+                f"Ticket {ticket.ticket_id}: assunto='{ticket.subject}', status={ticket.status}, "
+                f"prioridade={ticket.priority or 'n/a'}."
+            )
+            if resolution_advice is not None:
+                reply_text = (
+                    f"{reply_text} Sugestao: {resolution_advice.summary}"
+                )
+                if resolution_advice.suggested_actions:
+                    reply_text = (
+                        f"{reply_text} Acao sugerida: {resolution_advice.suggested_actions[0]}"
+                    )
             return TechnicianCommandResponse(
                 command_name="ticket",
                 status="completed",
                 operation_mode=ticket.integration_mode,
-                reply_text=(
-                    f"Ticket {ticket.ticket_id}: assunto='{ticket.subject}', status={ticket.status}, "
-                    f"prioridade={ticket.priority or 'n/a'}."
-                ),
+                reply_text=reply_text,
                 ticket=ticket,
-                notes=["Consulta operacional de ticket executada com sucesso."],
+                resolution_advice=resolution_advice,
+                notes=[
+                    "Consulta operacional de ticket executada com sucesso.",
+                    *resolution_notes,
+                ],
             )
 
         if command_name == "correlate":
@@ -1204,13 +1295,24 @@ class HelpdeskOrchestrator:
                 },
             )
 
+            resolution_advice, resolution_notes = await self._safe_resolution_advice(
+                ticket.ticket_id
+            )
+            if resolution_advice is not None:
+                reply_text = f"{reply_text} Sugestao: {resolution_advice.summary}"
+                if resolution_advice.suggested_actions:
+                    reply_text = (
+                        f"{reply_text} Acao sugerida: {resolution_advice.suggested_actions[0]}"
+                    )
+
             return TechnicianCommandResponse(
                 command_name="comment",
                 status="completed",
                 operation_mode=operation_mode,
                 reply_text=reply_text,
                 ticket=ticket,
-                notes=[*result.notes, *notification_notes],
+                resolution_advice=resolution_advice,
+                notes=[*result.notes, *notification_notes, *resolution_notes],
             )
 
         if command_name == "status":
@@ -1260,6 +1362,76 @@ class HelpdeskOrchestrator:
                 )
 
             ticket = self._to_ticket_details_response(result.ticket)
+            operation_mode = result.mode
+            solution_recorded = False
+            requester_notified = False
+
+            draft_resolution_advice, resolution_notes = await self._safe_resolution_advice(
+                ticket.ticket_id
+            )
+            resolution_advice = draft_resolution_advice
+            solution_notes: list[str] = []
+            notification_notes: list[str] = []
+
+            if ticket.status == "solved" and draft_resolution_advice is not None:
+                try:
+                    solution_result = await self.glpi_client.add_ticket_solution(
+                        ticket_id=ticket.ticket_id,
+                        content=self._build_ticket_solution_message(
+                            ticket=ticket,
+                            operator=requester,
+                            resolution_advice=draft_resolution_advice,
+                        ),
+                        author_glpi_user_id=requester.glpi_user_id,
+                    )
+                    operation_mode = self._merge_modes(operation_mode, solution_result.mode)
+                    ticket = self._to_ticket_details_response(solution_result.ticket)
+                    solution_recorded = True
+                    solution_notes.extend(solution_result.notes)
+                except IntegrationError as exc:
+                    solution_notes.append(
+                        f"Status atualizado, mas falhou o registro da solution no GLPI: {exc}"
+                    )
+
+                refreshed_resolution_advice, refreshed_resolution_notes = await self._safe_resolution_advice(
+                    ticket.ticket_id
+                )
+                resolution_notes.extend(refreshed_resolution_notes)
+                if refreshed_resolution_advice is not None:
+                    resolution_advice = refreshed_resolution_advice
+
+                if ticket.requester_glpi_user_id:
+                    try:
+                        requester_identity = await self.identity_service.get_requester_by_glpi_user_id(
+                            ticket.requester_glpi_user_id
+                        )
+                        notification_notes.extend(requester_identity.notes)
+                        if requester_identity.requester.phone_number:
+                            requester_message = self._build_requester_status_message(
+                                ticket=ticket,
+                                operator=requester,
+                                resolution_advice=resolution_advice,
+                            )
+                            requester_delivery = await self.whatsapp_client.send_text_message(
+                                to_number=requester_identity.requester.phone_number,
+                                body=requester_message,
+                            )
+                            operation_mode = self._merge_modes(operation_mode, requester_delivery.mode)
+                            notification_notes.extend(requester_delivery.notes)
+                            requester_notified = True
+                        else:
+                            notification_notes.append(
+                                "Solicitante do ticket encontrado, mas sem telefone configurado para notificacao de status."
+                            )
+                    except ResourceNotFoundError:
+                        notification_notes.append(
+                            "Solicitante do ticket nao pode ser resolvido para notificacao automatica de status."
+                        )
+                    except IntegrationError as exc:
+                        notification_notes.append(
+                            f"Status atualizado, mas falhou a notificacao do solicitante: {exc}"
+                        )
+
             await self._audit_event(
                 event_type="ticket_status_changed",
                 actor_external_id=requester.external_id,
@@ -1268,17 +1440,30 @@ class HelpdeskOrchestrator:
                 source_channel="whatsapp",
                 status=ticket.status,
                 payload_json={
-                    "integration_mode": result.mode,
+                    "integration_mode": operation_mode,
                     "new_status": ticket.status,
+                    "solution_recorded": solution_recorded,
+                    "requester_notified": requester_notified,
                 },
             )
+
+            reply_text = f"Status do ticket {ticket.ticket_id} atualizado para {ticket.status}."
+            if requester_notified:
+                reply_text = f"{reply_text} Atualizacao enviada ao solicitante."
+            if resolution_advice is not None:
+                reply_text = f"{reply_text} Sugestao: {resolution_advice.summary}"
+                if resolution_advice.suggested_actions:
+                    reply_text = (
+                        f"{reply_text} Acao sugerida: {resolution_advice.suggested_actions[0]}"
+                    )
             return TechnicianCommandResponse(
                 command_name="status",
                 status="completed",
-                operation_mode=result.mode,
-                reply_text=f"Status do ticket {ticket.ticket_id} atualizado para {ticket.status}.",
+                operation_mode=operation_mode,
+                reply_text=reply_text,
                 ticket=ticket,
-                notes=result.notes,
+                resolution_advice=resolution_advice,
+                notes=[*result.notes, *solution_notes, *notification_notes, *resolution_notes],
             )
 
         if command_name == "assign":
@@ -1476,17 +1661,193 @@ class HelpdeskOrchestrator:
             "Se precisar complementar, responda esta conversa informando o número do chamado."
         )
 
+    def _build_requester_status_message(
+        self,
+        ticket: TicketDetailsResponse,
+        operator: RequesterIdentity,
+        resolution_advice: TicketResolutionAdviceResponse | None,
+    ) -> str:
+        operator_name = operator.display_name or operator.external_id or "atendente"
+        lines = [
+            f"Atualizacao do chamado {ticket.ticket_id}: {ticket.subject}",
+            f"O atendente {operator_name} atualizou o status para {ticket.status}.",
+        ]
+        if resolution_advice is not None:
+            lines.append(f"Resumo da resolucao: {resolution_advice.summary}")
+            if resolution_advice.suggested_actions:
+                lines.append(
+                    f"Orientacao registrada: {resolution_advice.suggested_actions[0]}"
+                )
+        lines.append(
+            "Se o problema persistir, responda esta conversa informando o numero do chamado."
+        )
+        return "\n".join(lines)
+
+    def _build_ticket_solution_message(
+        self,
+        ticket: TicketDetailsResponse,
+        operator: RequesterIdentity,
+        resolution_advice: TicketResolutionAdviceResponse,
+    ) -> str:
+        operator_name = operator.display_name or operator.external_id or "atendente"
+        lines = [
+            f"Encerramento operacional registrado por {operator_name}.",
+            f"Ticket: {ticket.ticket_id} | Assunto: {ticket.subject}",
+            f"Resumo da resolucao: {resolution_advice.summary}",
+        ]
+        for index, action in enumerate(resolution_advice.suggested_actions[:2], start=1):
+            lines.append(f"Acao {index}: {action}")
+        lines.append("Origem: assistencia de resolucao do backend.")
+        return "\n".join(lines)
+
     def _build_operator_assistant_reply(
         self,
         role: UserRole,
         triage: TicketTriageResponse,
     ) -> str:
         next_step = triage.next_steps[0] if triage.next_steps else "Use /help para ver os comandos disponíveis."
-        return (
-            f"Perfil operacional detectado: {role.value}. Não abri chamado automaticamente. "
-            f"Triagem: {triage.summary} Próximo passo: {next_step} "
-            f"Se quiser registrar um novo chamado, use /open <descrição>."
+        parts = [
+            f"Perfil operacional detectado: {role.value}. Não abri chamado automaticamente.",
+            f"Triagem: {triage.summary}",
+            f"Próximo passo: {next_step}",
+        ]
+        if triage.resolution_hints:
+            parts.append(f"Sugestao de resolucao: {triage.resolution_hints[0]}")
+        if triage.similar_incidents:
+            parts.append(f"Caso semelhante: {triage.similar_incidents[0]}")
+        parts.append("Se quiser registrar um novo chamado, use /open <descrição>.")
+        return " ".join(parts)
+
+    def _to_ticket_resolution_entry_response(self, entry: object) -> TicketResolutionEntryResponse:
+        return TicketResolutionEntryResponse(
+            source=str(getattr(entry, "source", "unknown")),
+            content=str(getattr(entry, "content", "")),
+            created_at=getattr(entry, "created_at", None),
+            author_glpi_user_id=getattr(entry, "author_glpi_user_id", None),
         )
+
+    async def _safe_resolution_advice(
+        self,
+        ticket_id: str,
+    ) -> tuple[TicketResolutionAdviceResponse | None, list[str]]:
+        try:
+            return await self.advise_ticket_resolution(ticket_id), []
+        except (IntegrationError, ResourceNotFoundError) as exc:
+            return None, [f"Assistencia de resolucao indisponivel para o ticket: {exc}"]
+
+    def _coerce_ticket_priority(self, priority_value: str | None) -> TicketPriority | None:
+        if not priority_value:
+            return None
+        try:
+            return TicketPriority(priority_value.strip().lower())
+        except ValueError:
+            return None
+
+    def _build_resolution_actions(
+        self,
+        *,
+        triage: TicketTriageResponse,
+        entries: list[object],
+    ) -> list[str]:
+        actions: list[str] = []
+        for entry in entries:
+            source = str(getattr(entry, "source", "historico"))
+            content = str(getattr(entry, "content", "")).strip()
+            if content:
+                actions.append(f"Revisar {source} recente: {content}")
+                break
+        actions.extend(triage.resolution_hints)
+        actions.extend(triage.next_steps)
+
+        deduplicated: list[str] = []
+        for action in actions:
+            if action and action not in deduplicated:
+                deduplicated.append(action)
+        return deduplicated[:4]
+
+    async def _try_llm_resolution_assist(
+        self,
+        *,
+        ticket: object,
+        triage: TicketTriageResponse,
+        snapshot: object | None,
+        entries: list[object],
+    ) -> tuple[str | None, list[str], list[str]]:
+        status = self.llm_client.get_status()
+        if status.status != "configured":
+            return (
+                None,
+                [],
+                [
+                    "Camada LLM indisponivel para assistencia de resolucao; mantendo recomendacoes heuristicas."
+                ],
+            )
+
+        history_lines = [
+            self._format_resolution_entry_for_prompt(entry)
+            for entry in entries[:6]
+        ]
+        history_block = "\n".join(history_lines) if history_lines else "- nenhum followup ou solution recente disponivel"
+        prompt = (
+            "Voce e um assistente de resolucao de helpdesk. "
+            "Use apenas o contexto fornecido. "
+            "Responda com no maximo 5 linhas. "
+            "A primeira linha deve comecar com 'resumo:'. "
+            "As proximas linhas devem comecar com 'acao:'. "
+            "Nao proponha shell, SSH, automacao nao homologada, reset destrutivo ou mudancas sem evidencia.\n\n"
+            f"Ticket: {getattr(ticket, 'ticket_id', 'n/a')}\n"
+            f"Assunto: {getattr(ticket, 'subject', 'n/a')}\n"
+            f"Status atual: {getattr(ticket, 'status', 'n/a')}\n"
+            f"Prioridade: {getattr(ticket, 'priority', None) or 'n/a'}\n"
+            f"Categoria: {getattr(snapshot, 'category_name', None) or getattr(ticket, 'category_name', None) or 'n/a'}\n"
+            f"Servico: {getattr(snapshot, 'service_name', None) or 'n/a'}\n"
+            f"Fila sugerida: {getattr(snapshot, 'routed_to', None) or triage.suggested_queue}\n"
+            f"Resumo atual: {triage.summary}\n"
+            f"Dicas de resolucao: {' | '.join(triage.resolution_hints) if triage.resolution_hints else 'n/a'}\n"
+            f"Casos similares: {' | '.join(triage.similar_incidents) if triage.similar_incidents else 'n/a'}\n"
+            "Historico recente do ticket:\n"
+            f"{history_block}"
+        )
+
+        try:
+            result = await self.llm_client.generate_text(
+                user_prompt=prompt,
+                system_prompt=(
+                    "Voce orienta a resolucao segura de tickets com base no historico real do chamado. "
+                    "Priorize baixo risco, reaproveite o que ja funcionou e mantenha as acoes objetivas."
+                ),
+                max_tokens=260,
+                temperature=0.1,
+            )
+        except IntegrationError as exc:
+            return None, [], [f"Falha ao gerar assistencia de resolucao com LLM: {exc}"]
+
+        summary: str | None = None
+        actions: list[str] = []
+        for raw_line in result.content.splitlines():
+            line = raw_line.strip()
+            lowered = line.lower()
+            if lowered.startswith("resumo:") and summary is None:
+                summary = line.split(":", maxsplit=1)[1].strip()
+            elif lowered.startswith("acao:"):
+                action = line.split(":", maxsplit=1)[1].strip()
+                if action:
+                    actions.append(action)
+
+        if not summary and not actions:
+            return None, [], [
+                "LLM retornou formato fora do contrato de resolucao; usando recomendacoes heuristicas."
+            ]
+
+        return summary, actions[:4], [
+            f"Assistencia de resolucao enriquecida pelo provider {result.provider}."
+        ]
+
+    def _format_resolution_entry_for_prompt(self, entry: object) -> str:
+        source = str(getattr(entry, "source", "historico"))
+        created_at = getattr(entry, "created_at", None) or "sem-data"
+        content = str(getattr(entry, "content", "")).strip() or "sem-conteudo"
+        return f"- [{source}] {created_at}: {content}"
 
     def _build_explicit_operator_open_request(
         self,
