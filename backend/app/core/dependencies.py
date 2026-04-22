@@ -4,6 +4,7 @@ from app.core.config import Settings, get_settings
 from app.orchestration.helpdesk import HelpdeskOrchestrator
 from app.services.automation import AutomationService
 from app.services.ansible_runner import AnsibleRunnerClient
+from app.services.docker_runtime import DockerRuntimeClient
 from app.services.glpi import GLPIClient
 from app.services.identity import IdentityService
 from app.services.intake import UserIntakeService
@@ -30,6 +31,10 @@ def get_whatsapp_client(settings: Settings = Depends(get_settings)) -> WhatsAppC
 
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:
     return LLMClient(settings)
+
+
+def get_docker_runtime_client() -> DockerRuntimeClient:
+    return DockerRuntimeClient()
 
 
 def get_operational_store(

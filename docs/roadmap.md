@@ -111,6 +111,8 @@ Situação observada hoje:
 - mudanças para `solved` já podem consolidar uma `solution` estruturada no GLPI, retroalimentando o histórico que a IA consulta depois;
 - ainda faltam relatórios operacionais completos, detecção de incidentes em massa, pós-mortem semi-automático e recomendações por recorrência.
 
+O detalhamento técnico desta frente fica em [Fase 5: Operacao Avancada](fase-5-operacao-avancada.md).
+
 ## Backlog priorizado
 
 1. Estruturar backend principal de integração.

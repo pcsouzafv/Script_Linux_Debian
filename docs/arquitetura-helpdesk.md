@@ -64,6 +64,7 @@ sequenceDiagram
     U->>W: Solicita abertura de chamado
     W->>O: Entrega mensagem e metadados
     O->>O: Identifica usuário e valida perfil
+    O->>O: Define fila inicial por categoria, prioridade e contexto operacional validado
     O->>K: Busca FAQ e classificação inicial
     O->>G: Cria ticket com contexto estruturado
     G-->>O: Retorna número do chamado
@@ -87,6 +88,13 @@ sequenceDiagram
 - Técnico N2 ou N3 pode solicitar playbooks avançados com trilha de auditoria.
 - Supervisor aprova ações de impacto médio ou alto.
 - Administrador gerencia catálogos, tokens, segredos e políticas.
+
+## Roteamento inicial de filas
+
+- O roteamento padrão parte de categoria e prioridade: acesso vai para `ServiceDesk-Acessos`, infraestrutura/rede/servidor vai para `Infraestrutura-N1`, e criticidade alta vai para `NOC-Critico`.
+- O backend pode ajustar a fila quando o solicitante validado no servidor pertence a contexto operacional, como times de `infraestrutura` ou `plataforma`, e o alvo do chamado e claramente operacional, como `VPN`, `bastion`, `API`, `backend`, `Redis` ou outros componentes de infraestrutura.
+- Esse ajuste evita retriagem manual para chamados que sao formalmente de acesso, mas operacionalmente pertencem ao time de infraestrutura.
+- O ajuste de fila nao deve confiar no payload bruto do cliente em rotas com efeito; a identidade usada para a decisao precisa ser resolvida novamente no servidor via GLPI ou diretório confiável.
 
 ## Integrações mínimas do MVP
 

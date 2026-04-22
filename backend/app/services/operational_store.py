@@ -72,6 +72,14 @@ class AuditEventListResult:
 
 
 @dataclass(slots=True)
+class OperationalSessionListResult:
+    sessions: list[OperationalSessionRecord]
+    storage_mode: str
+    total_sessions: int
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class JobRequestRecord:
     job_id: str
     automation_name: str
@@ -197,6 +205,68 @@ class OperationalStateStore:
                 "ticket_options": len(normalized_record.ticket_options),
                 "transcript_entries": len(normalized_record.transcript),
             },
+        )
+
+    async def list_sessions(
+        self,
+        *,
+        limit: int = 20,
+    ) -> OperationalSessionListResult:
+        normalized_limit = max(1, min(limit, 100))
+
+        connection = await self._open_connection()
+        if connection is not None:
+            try:
+                rows = await connection.fetch(
+                    f"""
+                    SELECT
+                        session_key,
+                        flow_name,
+                        stage,
+                        requester_display_name,
+                        state_json,
+                        updated_at,
+                        COUNT(*) OVER() AS total_rows
+                    FROM {self.schema_name}.session_state
+                    ORDER BY updated_at DESC
+                    LIMIT $1
+                    """,
+                    normalized_limit,
+                )
+            finally:
+                await connection.close()
+
+            total_sessions = int(rows[0]["total_rows"]) if rows else 0
+            return OperationalSessionListResult(
+                sessions=[self._session_from_row(row) for row in rows],
+                storage_mode="postgres",
+                total_sessions=total_sessions,
+            )
+
+        sessions = [
+            self._clone_session_record(record)
+            for record in sorted(
+                _MEMORY_SESSION_STATE.values(),
+                key=lambda item: item.updated_at,
+                reverse=True,
+            )
+        ]
+
+        notes: list[str] = []
+        if self.settings.operational_postgres_dsn:
+            notes.append(
+                "Consulta de sessoes retornada a partir do fallback em memoria porque o PostgreSQL operacional nao respondeu."
+            )
+        else:
+            notes.append(
+                "Consulta de sessoes retornada a partir do fallback em memoria; configure PostgreSQL para historico duravel."
+            )
+
+        return OperationalSessionListResult(
+            sessions=sessions[:normalized_limit],
+            storage_mode="memory",
+            total_sessions=len(sessions),
+            notes=notes,
         )
 
     async def delete_session(self, phone_number: str, reason: str | None = None) -> None:

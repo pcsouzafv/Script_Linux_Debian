@@ -18,6 +18,8 @@ Nesta fase o backend entrega:
 - Endpoint para inspecionar o status da camada de IA do bot e o provider ativo.
 - Modo local sem integrações configuradas, retornando respostas mock úteis para desenvolvimento.
 
+O roteamento inicial de fila agora não depende apenas de categoria e prioridade. Quando houver contexto operacional claro, a triagem também pode considerar papel e time do solicitante para evitar retriagem desnecessária. Exemplo: incidente de acesso relacionado a VPN, bastion, API, backend ou outro alvo de infraestrutura, aberto por técnico de `infraestrutura` ou `plataforma`, pode cair direto em `Infraestrutura-N1` em vez de `ServiceDesk-Acessos`.
+
 O backend é uma aplicação separada dentro da plataforma. Ele não instala GLPI, Zabbix, WhatsApp, AWX ou Rundeck; ele orquestra essas integrações quando as credenciais e os serviços externos estiverem disponíveis.
 
 ## Estrutura
@@ -55,6 +57,20 @@ pip install -e .[dev]
 O arquivo [backend/.env](/home/ricardo/Script_Linux_Debian/backend/.env) já foi criado com todas as chaves de credenciais esperadas. Enquanto os valores continuarem como placeholder, o backend trata essas integrações como não configuradas e permanece em modo mock. Quando quiser ativar chamadas externas, voce pode usar tanto tokens quanto usuario e senha, dependendo da integracao.
 
 As rotas internas sob `/api/v1/helpdesk/*` e o endpoint bruto `/api/v1/webhooks/whatsapp/messages` exigem um token de acesso enviado em `X-Helpdesk-API-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_API_ACCESS_TOKEN` antes de consumir ou publicar essas rotas.
+
+Seguranca do roteamento:
+
+- a rota de abertura de ticket nao confia em `role`, `team` nem `glpi_user_id` informados pelo cliente para decidir fila real;
+- o backend resolve a identidade novamente no servidor e so entao aplica o ajuste de fila por contexto operacional;
+- a rota `POST /api/v1/helpdesk/triage` aceita `requester_role` e `requester_team` apenas como contexto de simulacao ou apoio operacional, sem efeito direto no GLPI;
+- o enriquecimento por LLM nao pode contradizer a fila final prevista quando a triagem ja decidiu o encaminhamento.
+
+Leitura pratica de fila inicial atual:
+
+- `critical` continua indo para `NOC-Critico`;
+- categorias de acesso sem contexto operacional seguem para `ServiceDesk-Acessos`;
+- categorias de infra, rede e servidor seguem para `Infraestrutura-N1`;
+- casos de acesso com solicitante operacional validado no servidor e alvo claro de infraestrutura tambem podem seguir direto para `Infraestrutura-N1`.
 
 A rota administrativa `GET /api/v1/helpdesk/audit/events` usa credencial separada, enviada em `X-Helpdesk-Audit-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_AUDIT_ACCESS_TOKEN`; sem isso, a consulta de auditoria responde como indisponível por seguranca.
 
@@ -177,6 +193,8 @@ Guardrails atuais:
 As respostas de `GET /api/v1/helpdesk/automation/jobs` e `GET /api/v1/helpdesk/automation/jobs/{job_id}` agora expõem tambem `retry_scheduled_at` e `retry_delay_seconds` quando houver nova tentativa pendente.
 
 O resumo protegido `GET /api/v1/helpdesk/automation/summary` entrega somente metadados operacionais agregados: contagem por `approval_status` e `execution_status`, profundidade da fila principal e da dead-letter, alem das marcas de tempo mais antigas para jobs aguardando aprovacao, enfileirados, em execucao e com retry agendado. O endpoint nao devolve `payload_json`, reduzindo exposicao de contexto operacional sensivel durante troubleshooting.
+
+Tambem existe agora o resumo protegido `GET /api/v1/helpdesk/reports/tickets/summary`, sob o mesmo escopo administrativo de auditoria. Esse endpoint agrega os snapshots analiticos dos tickets para devolver um recorte inicial da operacao: total de tickets, backlog em aberto, backlog atribuido e nao atribuido, backlog de alta prioridade, taxa simples de cobertura de atribuicao, taxa simples de resolucao, media de correlacao e distribuicao por status, prioridade, canal, categoria e fila.
 
 Catalogo inicial:
 

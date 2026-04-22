@@ -181,3 +181,5 @@ O caminho mais pragmatico e tratar o projeto em dois blocos imediatos:
 - bloco 2: backend de orquestracao com integracoes e webhook.
 
 Depois disso, a implantacao das automacoes deve entrar como um terceiro bloco separado, com ferramenta propria de execucao e politica de aprovacao.
+
+Para transformar o estado atual em um MVP pronto para piloto controlado, use o [Checklist de fechamento do MVP](docs/fechamento-mvp.md) como referencia unica de lacunas de entrega, e deixe o [Checklist executivo de go-live](docs/checklist-go-live.md) apenas para a janela final de liberacao.

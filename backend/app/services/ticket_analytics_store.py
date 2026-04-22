@@ -52,7 +52,32 @@ class TicketAnalyticsSnapshotListResult:
     notes: list[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class TicketAnalyticsSummaryResult:
+    storage_mode: str
+    total_tickets: int
+    unresolved_backlog_count: int
+    assigned_backlog_count: int
+    unassigned_backlog_count: int
+    high_priority_backlog_count: int
+    resolved_ticket_count: int
+    closed_ticket_count: int
+    backlog_assignment_coverage_percent: float
+    resolution_rate_percent: float
+    average_correlation_event_count: float
+    status_counts: dict[str, int] = field(default_factory=dict)
+    priority_counts: dict[str, int] = field(default_factory=dict)
+    source_channel_counts: dict[str, int] = field(default_factory=dict)
+    category_counts: dict[str, int] = field(default_factory=dict)
+    routed_to_counts: dict[str, int] = field(default_factory=dict)
+    oldest_backlog_updated_at: datetime | None = None
+    newest_snapshot_updated_at: datetime | None = None
+    notes: list[str] = field(default_factory=list)
+
+
 _MEMORY_TICKET_ANALYTICS: dict[str, TicketAnalyticsSnapshotRecord] = {}
+RESOLVED_TICKET_STATUSES = {"solved", "closed"}
+HIGH_PRIORITY_VALUES = {"high", "critical"}
 
 
 def clear_memory_ticket_analytics() -> None:
@@ -255,6 +280,39 @@ class TicketAnalyticsStore:
             notes=notes,
         )
 
+    async def summarize_snapshots(self) -> TicketAnalyticsSummaryResult:
+        connection = await self._open_connection()
+        if connection is not None:
+            try:
+                rows = await connection.fetch(
+                    f"""
+                    SELECT *
+                    FROM {self.schema_name}.ticket_analytics_snapshot
+                    """
+                )
+            finally:
+                await connection.close()
+
+            return self._build_summary_result(
+                records=[self._record_from_row(row) for row in rows],
+                storage_mode="postgres",
+            )
+
+        notes: list[str] = []
+        if self.settings.operational_postgres_dsn:
+            notes.append(
+                "Resumo operacional de tickets retornado do fallback em memoria porque o PostgreSQL operacional nao respondeu."
+            )
+        else:
+            notes.append(
+                "Resumo operacional de tickets retornado do fallback em memoria; configure PostgreSQL para historico duravel."
+            )
+        return self._build_summary_result(
+            records=[self._clone_record(record) for record in _MEMORY_TICKET_ANALYTICS.values()],
+            storage_mode="memory",
+            notes=notes,
+        )
+
     async def _open_connection(self) -> Any | None:
         if not self.settings.operational_postgres_dsn or asyncpg is None:
             return None
@@ -319,6 +377,128 @@ class TicketAnalyticsStore:
             snapshot_updated_at=now,
             attributes_json=deepcopy(record.attributes_json) if isinstance(record.attributes_json, dict) else {},
         )
+
+    def _build_summary_result(
+        self,
+        *,
+        records: list[TicketAnalyticsSnapshotRecord],
+        storage_mode: str,
+        notes: list[str] | None = None,
+    ) -> TicketAnalyticsSummaryResult:
+        status_counts: dict[str, int] = {}
+        priority_counts: dict[str, int] = {}
+        source_channel_counts: dict[str, int] = {}
+        category_counts: dict[str, int] = {}
+        routed_to_counts: dict[str, int] = {}
+
+        total_tickets = len(records)
+        unresolved_backlog_count = 0
+        assigned_backlog_count = 0
+        unassigned_backlog_count = 0
+        high_priority_backlog_count = 0
+        resolved_ticket_count = 0
+        closed_ticket_count = 0
+        correlation_total = 0
+        oldest_backlog_updated_at: datetime | None = None
+        newest_snapshot_updated_at: datetime | None = None
+
+        for record in records:
+            normalized_status = self._normalize_count_key(record.status)
+            normalized_priority = self._normalize_count_key(record.priority)
+            normalized_source_channel = self._normalize_count_key(record.source_channel)
+            normalized_category = self._optional_string(record.category_name) or "Sem categoria"
+            normalized_routed_to = self._optional_string(record.routed_to) or "Sem fila definida"
+            updated_reference = record.source_updated_at or record.snapshot_updated_at
+
+            self._increment_count(status_counts, normalized_status)
+            self._increment_count(priority_counts, normalized_priority)
+            self._increment_count(source_channel_counts, normalized_source_channel)
+            self._increment_count(category_counts, normalized_category)
+            self._increment_count(routed_to_counts, normalized_routed_to)
+
+            correlation_total += max(0, int(record.correlation_event_count or 0))
+            newest_snapshot_updated_at = self._max_datetime(
+                newest_snapshot_updated_at,
+                updated_reference,
+            )
+
+            if normalized_status == "solved":
+                resolved_ticket_count += 1
+            if normalized_status == "closed":
+                closed_ticket_count += 1
+
+            if normalized_status not in RESOLVED_TICKET_STATUSES:
+                unresolved_backlog_count += 1
+                oldest_backlog_updated_at = self._min_datetime(
+                    oldest_backlog_updated_at,
+                    updated_reference,
+                )
+                if record.assigned_glpi_user_id is not None:
+                    assigned_backlog_count += 1
+                else:
+                    unassigned_backlog_count += 1
+                if normalized_priority in HIGH_PRIORITY_VALUES:
+                    high_priority_backlog_count += 1
+
+        backlog_assignment_coverage_percent = 0.0
+        if unresolved_backlog_count > 0:
+            backlog_assignment_coverage_percent = round(
+                (assigned_backlog_count / unresolved_backlog_count) * 100,
+                2,
+            )
+
+        resolution_rate_percent = 0.0
+        if total_tickets > 0:
+            resolution_rate_percent = round(
+                ((resolved_ticket_count + closed_ticket_count) / total_tickets) * 100,
+                2,
+            )
+
+        average_correlation_event_count = 0.0
+        if total_tickets > 0:
+            average_correlation_event_count = round(correlation_total / total_tickets, 2)
+
+        return TicketAnalyticsSummaryResult(
+            storage_mode=storage_mode,
+            total_tickets=total_tickets,
+            unresolved_backlog_count=unresolved_backlog_count,
+            assigned_backlog_count=assigned_backlog_count,
+            unassigned_backlog_count=unassigned_backlog_count,
+            high_priority_backlog_count=high_priority_backlog_count,
+            resolved_ticket_count=resolved_ticket_count,
+            closed_ticket_count=closed_ticket_count,
+            backlog_assignment_coverage_percent=backlog_assignment_coverage_percent,
+            resolution_rate_percent=resolution_rate_percent,
+            average_correlation_event_count=average_correlation_event_count,
+            status_counts=status_counts,
+            priority_counts=priority_counts,
+            source_channel_counts=source_channel_counts,
+            category_counts=category_counts,
+            routed_to_counts=routed_to_counts,
+            oldest_backlog_updated_at=oldest_backlog_updated_at,
+            newest_snapshot_updated_at=newest_snapshot_updated_at,
+            notes=notes or [],
+        )
+
+    def _normalize_count_key(self, value: object) -> str:
+        return self._optional_string(value).lower() if self._optional_string(value) else "unknown"
+
+    def _increment_count(self, counts: dict[str, int], key: str) -> None:
+        counts[key] = counts.get(key, 0) + 1
+
+    def _min_datetime(self, current: datetime | None, candidate: datetime | None) -> datetime | None:
+        if candidate is None:
+            return current
+        if current is None or candidate < current:
+            return candidate
+        return current
+
+    def _max_datetime(self, current: datetime | None, candidate: datetime | None) -> datetime | None:
+        if candidate is None:
+            return current
+        if current is None or candidate > current:
+            return candidate
+        return current
 
     def _clone_record(self, record: TicketAnalyticsSnapshotRecord) -> TicketAnalyticsSnapshotRecord:
         return TicketAnalyticsSnapshotRecord(

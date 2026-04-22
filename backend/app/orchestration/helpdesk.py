@@ -18,6 +18,7 @@ from app.schemas.helpdesk import (
     TicketDetailsResponse,
     TicketOpenRequest,
     TicketOpenResponse,
+    TicketOperationsSummaryResponse,
     TicketPriority,
     TicketResolutionAdviceResponse,
     TicketResolutionEntryResponse,
@@ -147,6 +148,8 @@ class HelpdeskOrchestrator:
                 ),
                 asset_name=validated_request.asset_name,
                 service_name=validated_request.service_name,
+                requester_role=validated_request.requester.role,
+                requester_team=validated_request.requester.team,
             )
         )
         effective_request = validated_request.model_copy(
@@ -892,6 +895,38 @@ class HelpdeskOrchestrator:
             notes=deduplicated_notes,
         )
 
+    async def get_ticket_operations_summary(self) -> TicketOperationsSummaryResponse:
+        summary = await self.analytics_store.summarize_snapshots()
+        return TicketOperationsSummaryResponse(
+            storage_mode=summary.storage_mode,
+            total_tickets=summary.total_tickets,
+            unresolved_backlog_count=summary.unresolved_backlog_count,
+            assigned_backlog_count=summary.assigned_backlog_count,
+            unassigned_backlog_count=summary.unassigned_backlog_count,
+            high_priority_backlog_count=summary.high_priority_backlog_count,
+            resolved_ticket_count=summary.resolved_ticket_count,
+            closed_ticket_count=summary.closed_ticket_count,
+            backlog_assignment_coverage_percent=summary.backlog_assignment_coverage_percent,
+            resolution_rate_percent=summary.resolution_rate_percent,
+            average_correlation_event_count=summary.average_correlation_event_count,
+            status_counts=summary.status_counts,
+            priority_counts=summary.priority_counts,
+            source_channel_counts=summary.source_channel_counts,
+            category_counts=summary.category_counts,
+            routed_to_counts=summary.routed_to_counts,
+            oldest_backlog_updated_at=(
+                summary.oldest_backlog_updated_at.isoformat()
+                if summary.oldest_backlog_updated_at is not None
+                else None
+            ),
+            newest_snapshot_updated_at=(
+                summary.newest_snapshot_updated_at.isoformat()
+                if summary.newest_snapshot_updated_at is not None
+                else None
+            ),
+            notes=summary.notes,
+        )
+
     async def process_whatsapp_webhook_messages(
         self,
         messages: list[NormalizedWhatsAppMessage],
@@ -1024,6 +1059,8 @@ class HelpdeskOrchestrator:
                 ),
                 asset_name=message.asset_name,
                 service_name=message.service_name,
+                requester_role=requester.role,
+                requester_team=requester.team,
             )
         )
         available_commands = self._available_command_docs(requester.role)

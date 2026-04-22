@@ -10,9 +10,21 @@ import app.services.operational_store as operational_store_module
 
 from app.core.config import get_settings
 from app.main import app
+from app.services.docker_runtime import (
+    DockerApplicationRecord,
+    DockerContainerRecord,
+    DockerRuntimeClient,
+    DockerRuntimeSnapshot,
+)
 from app.services.glpi import MOCK_TICKET_STORE
 from app.services.job_queue import JobQueueService
-from app.services.operational_store import OperationalStateStore, get_memory_audit_events
+from app.services.operational_store import (
+    OperationalSessionRecord,
+    OperationalStateStore,
+    get_memory_audit_events,
+)
+from app.services.ticket_analytics_store import TicketAnalyticsSnapshotRecord, TicketAnalyticsStore
+from app.services.triage import TriageAgent
 
 
 client = TestClient(app)
@@ -21,6 +33,10 @@ AUDIT_HEADERS = {"X-Helpdesk-Audit-Key": "test-audit-token"}
 AUTOMATION_HEADERS = {"X-Helpdesk-Automation-Key": "test-automation-token"}
 AUTOMATION_READ_HEADERS = {
     "X-Helpdesk-Automation-Read-Key": "test-automation-read-token"
+}
+RUNTIME_OVERVIEW_HEADERS = {
+    **AUDIT_HEADERS,
+    **AUTOMATION_READ_HEADERS,
 }
 AUTOMATION_APPROVAL_HEADERS = {
     "X-Helpdesk-Automation-Approval-Key": "test-automation-approval-token"
@@ -91,6 +107,309 @@ def test_audit_route_accepts_previous_audit_token_during_rotation() -> None:
         settings.audit_access_token_previous = original_previous
 
     assert response.status_code == 200
+
+
+def test_ticket_operations_summary_route_rejects_api_token_without_dedicated_audit_token() -> None:
+    response = client.get("/api/v1/helpdesk/reports/tickets/summary")
+
+    assert response.status_code == 401
+    assert "auditoria administrativa" in response.json()["detail"].lower()
+
+
+def test_ticket_operations_summary_route_returns_backlog_distribution() -> None:
+    store = TicketAnalyticsStore(get_settings())
+    now = datetime.now(timezone.utc)
+
+    asyncio.run(
+        store.upsert_snapshot(
+            TicketAnalyticsSnapshotRecord(
+                ticket_id="501",
+                subject="WhatsApp: ERP indisponivel",
+                description="Origem: WhatsApp",
+                status="new",
+                priority="critical",
+                requester_glpi_user_id=7,
+                assigned_glpi_user_id=None,
+                external_id="helpdesk-whatsapp-501",
+                request_type_id=3,
+                request_type_name="Phone",
+                category_id=1,
+                category_name="Infra",
+                asset_name="erp-web-01",
+                service_name="erp",
+                source_channel="whatsapp",
+                routed_to="Infraestrutura-N1",
+                correlation_event_count=2,
+                source_updated_at=now - timedelta(hours=3),
+            )
+        )
+    )
+    asyncio.run(
+        store.upsert_snapshot(
+            TicketAnalyticsSnapshotRecord(
+                ticket_id="502",
+                subject="API: Liberar acesso ao ERP",
+                description="Origem: API",
+                status="processing",
+                priority="high",
+                requester_glpi_user_id=8,
+                assigned_glpi_user_id=101,
+                external_id="helpdesk-api-502",
+                request_type_id=1,
+                request_type_name="Direct",
+                category_id=2,
+                category_name="Acesso",
+                asset_name="erp-auth-01",
+                service_name="erp",
+                source_channel="api",
+                routed_to="ServiceDesk-Acessos",
+                correlation_event_count=1,
+                source_updated_at=now - timedelta(hours=1),
+            )
+        )
+    )
+    asyncio.run(
+        store.upsert_snapshot(
+            TicketAnalyticsSnapshotRecord(
+                ticket_id="503",
+                subject="WhatsApp: incidente resolvido",
+                description="Origem: WhatsApp",
+                status="solved",
+                priority="medium",
+                requester_glpi_user_id=9,
+                assigned_glpi_user_id=102,
+                external_id="helpdesk-whatsapp-503",
+                request_type_id=3,
+                request_type_name="Phone",
+                category_id=1,
+                category_name="Infra",
+                asset_name="erp-batch-01",
+                service_name="erp",
+                source_channel="whatsapp",
+                routed_to="Infraestrutura-N1",
+                correlation_event_count=0,
+                source_updated_at=now,
+            )
+        )
+    )
+
+    response = client.get(
+        "/api/v1/helpdesk/reports/tickets/summary",
+        headers=AUDIT_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["storage_mode"] == "memory"
+    assert body["total_tickets"] == 3
+    assert body["unresolved_backlog_count"] == 2
+    assert body["assigned_backlog_count"] == 1
+    assert body["unassigned_backlog_count"] == 1
+    assert body["high_priority_backlog_count"] == 2
+    assert body["resolved_ticket_count"] == 1
+    assert body["closed_ticket_count"] == 0
+    assert body["backlog_assignment_coverage_percent"] == 50.0
+    assert body["resolution_rate_percent"] == 33.33
+    assert body["average_correlation_event_count"] == 1.0
+    assert body["status_counts"]["new"] == 1
+    assert body["status_counts"]["processing"] == 1
+    assert body["status_counts"]["solved"] == 1
+    assert body["source_channel_counts"]["whatsapp"] == 2
+    assert body["source_channel_counts"]["api"] == 1
+    assert body["category_counts"]["Infra"] == 2
+    assert body["category_counts"]["Acesso"] == 1
+    assert body["routed_to_counts"]["Infraestrutura-N1"] == 2
+    assert body["routed_to_counts"]["ServiceDesk-Acessos"] == 1
+    assert body["oldest_backlog_updated_at"] is not None
+    assert body["newest_snapshot_updated_at"] is not None
+
+
+def test_runtime_overview_route_requires_automation_read_scope_alongside_audit_scope() -> None:
+    response = client.get(
+        "/api/v1/helpdesk/runtime/overview",
+        headers=AUDIT_HEADERS,
+    )
+
+    assert response.status_code == 401
+    assert "leitura administrativa de automação" in response.json()["detail"].lower()
+
+
+def test_runtime_overview_route_returns_sessions_audit_and_operational_summaries(monkeypatch) -> None:
+    settings = get_settings()
+    session_store = OperationalStateStore(settings)
+    analytics_store = TicketAnalyticsStore(settings)
+    now = datetime.now(timezone.utc)
+
+    async def fake_get_runtime_snapshot(self, *, limit: int = 12) -> DockerRuntimeSnapshot:
+        return DockerRuntimeSnapshot(
+            configured=True,
+            status="configured",
+            mode="docker-cli",
+            binary_path="/usr/bin/docker",
+            application_count=2,
+            total_containers=3,
+            running_count=2,
+            exited_count=1,
+            restarting_count=0,
+            unhealthy_count=1,
+            applications=[
+                DockerApplicationRecord(
+                    application_name="helpdesk-lab",
+                    status="running",
+                    total_containers=1,
+                    running_count=1,
+                    unhealthy_count=0,
+                    application_services=["glpi"],
+                    support_services=[],
+                    notes=[],
+                ),
+                DockerApplicationRecord(
+                    application_name="idiomasbr2026",
+                    status="running",
+                    total_containers=2,
+                    running_count=1,
+                    unhealthy_count=1,
+                    application_services=["backend"],
+                    support_services=["redis (cache)"],
+                    notes=["Redis/cache detectado como apoio de desempenho do stack."],
+                ),
+            ],
+            containers=[
+                DockerContainerRecord(
+                    container_id="abc123",
+                    name="glpi-app",
+                    image="glpi:10",
+                    status="Up 2 hours (healthy)",
+                    state="running",
+                    application_name="helpdesk-lab",
+                    service_role="service",
+                    health_status="healthy",
+                    compose_project="helpdesk-lab",
+                    compose_service="glpi",
+                    ports="0.0.0.0:8088->80/tcp",
+                ),
+                DockerContainerRecord(
+                    container_id="def456",
+                    name="worker-api",
+                    image="custom/worker:latest",
+                    status="Up 5 minutes (unhealthy)",
+                    state="running",
+                    application_name="idiomasbr2026",
+                    service_role="backend",
+                    health_status="unhealthy",
+                    compose_project="ops-stack",
+                    compose_service="worker",
+                    ports=None,
+                ),
+            ],
+            notes=["Monitoramento Docker consultado via CLI local."],
+        )
+
+    monkeypatch.setattr(DockerRuntimeClient, "get_runtime_snapshot", fake_get_runtime_snapshot)
+
+    asyncio.run(
+        session_store.save_session(
+            OperationalSessionRecord(
+                phone_number="+5511912345678",
+                requester_display_name="Ricardo Runtime",
+                flow_name="user_ticket_finalization",
+                stage="awaiting_ticket_selection",
+                selected_catalog_code="vpn-access",
+                transcript=["Quero encerrar o chamado", "Escolha uma opcao"],
+                ticket_options=[{"ticket_id": "GLPI-1001", "subject": "VPN"}],
+            )
+        )
+    )
+    asyncio.run(
+        analytics_store.upsert_snapshot(
+            TicketAnalyticsSnapshotRecord(
+                ticket_id="701",
+                subject="WhatsApp: VPN intermitente",
+                description="Origem: WhatsApp",
+                status="new",
+                priority="high",
+                requester_glpi_user_id=31,
+                assigned_glpi_user_id=None,
+                external_id="helpdesk-whatsapp-701",
+                request_type_id=3,
+                request_type_name="Phone",
+                category_id=1,
+                category_name="Rede",
+                asset_name="vpn-gateway-01",
+                service_name="vpn",
+                source_channel="whatsapp",
+                routed_to="Infraestrutura-N1",
+                correlation_event_count=3,
+                source_updated_at=now,
+            )
+        )
+    )
+    create_job_response = client.post(
+        "/api/v1/helpdesk/automation/jobs",
+        headers=AUTOMATION_HEADERS,
+        json={
+            "requested_by": "ops-ana",
+            "automation_name": "noop.healthcheck",
+            "ticket_id": "701",
+            "reason": "Popular overview operacional",
+        },
+    )
+
+    assert create_job_response.status_code == 202
+
+    response = client.get(
+        "/api/v1/helpdesk/runtime/overview",
+        headers=RUNTIME_OVERVIEW_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["health"]["status"] == "ok"
+    assert body["health"]["api_prefix"] == "/api/v1"
+    assert body["glpi"]["status"] == "mock"
+    assert body["zabbix"]["status"] == "mock"
+    assert body["messaging"]["resolved_delivery_provider"] == "mock"
+    assert body["llm"]["status"] == "disabled"
+    assert body["operational_store"]["status"] == "memory"
+    assert body["operational_store"]["mode"] == "memory"
+    assert body["operational_store"]["schema_name"] == settings.operational_postgres_schema
+    assert body["queue"]["status"] == "memory"
+    assert body["queue"]["mode"] == "memory"
+    assert body["queue"]["queue_key"] == "helpdesk:automation:jobs"
+    assert body["queue"]["queue_depth"] == 1
+    assert body["automation_runner"]["mode"] == "ansible-runner"
+    assert body["automation_runner"]["project_count"] >= 1
+    assert body["automation_runner"]["catalog_entry_count"] >= 1
+    assert body["docker"]["status"] == "configured"
+    assert body["docker"]["mode"] == "docker-cli"
+    assert body["docker"]["application_count"] == 2
+    assert body["docker"]["total_containers"] == 3
+    assert body["docker"]["running_count"] == 2
+    assert body["docker"]["unhealthy_count"] == 1
+    assert body["docker"]["applications"][1]["application_name"] == "idiomasbr2026"
+    assert body["docker"]["applications"][1]["support_services"] == ["redis (cache)"]
+    assert "desempenho" in body["docker"]["applications"][1]["notes"][0].lower()
+    assert body["docker"]["containers"][0]["name"] == "glpi-app"
+    assert body["docker"]["containers"][0]["application_name"] == "helpdesk-lab"
+    assert body["docker"]["containers"][1]["health_status"] == "unhealthy"
+    assert body["sessions"]["storage_mode"] == "memory"
+    assert body["sessions"]["total_sessions"] == 1
+    assert body["sessions"]["sessions"][0]["phone_number_masked"] == "***5678"
+    assert body["sessions"]["sessions"][0]["flow_name"] == "user_ticket_finalization"
+    assert body["audit"]["recent_event_count"] >= 1
+    assert body["audit"]["event_type_counts"]["session_state_saved"] >= 1
+    assert body["ticket_operations"]["total_tickets"] == 1
+    assert body["ticket_operations"]["source_channel_counts"]["whatsapp"] == 1
+    assert body["automation"]["total_jobs"] == 1
+
+
+def test_ops_dashboard_page_is_available_for_browser_access() -> None:
+    response = client.get("/ops")
+
+    assert response.status_code == 200
+    assert "Painel operacional do orquestrador" in response.text
+    assert "/api/v1/helpdesk/runtime/overview" in response.text
+    assert "Containers Docker" in response.text
 
 
 def test_automation_route_rejects_api_token_without_dedicated_automation_token() -> None:
@@ -1118,6 +1437,62 @@ def test_triage_endpoint_suggests_queue_and_next_steps() -> None:
     assert len(body["next_steps"]) >= 1
 
 
+def test_triage_endpoint_uses_requester_context_to_route_operational_access_ticket() -> None:
+    payload = {
+        "subject": "Sem acesso VPN administrativo",
+        "description": "Tecnico de infraestrutura perdeu acesso a VPN do bastion para atuar no ambiente.",
+        "service_name": "vpn",
+        "requester_role": "technician",
+        "requester_team": "infraestrutura",
+    }
+
+    response = client.post("/api/v1/helpdesk/triage", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["suggested_category"] == "acesso"
+    assert body["suggested_queue"] == "Infraestrutura-N1"
+    assert any("contexto do solicitante" in note.lower() for note in body["notes"])
+
+
+def test_triage_endpoint_aligns_llm_steps_with_final_operational_queue(monkeypatch) -> None:
+    async def fake_try_llm_assist(
+        self,
+        payload,
+        suggested_category,
+        suggested_priority,
+        suggested_queue,
+        resolution_hints,
+        similar_incidents,
+    ):
+        return (
+            "Resumo ajustado por LLM.",
+            [
+                "Se necessário, redirecione o atendimento para o ServiceDesk-Acessos para análise adicional.",
+            ],
+            ["Triagem enriquecida pelo provider fake."],
+        )
+
+    monkeypatch.setattr(TriageAgent, "_try_llm_assist", fake_try_llm_assist)
+
+    response = client.post(
+        "/api/v1/helpdesk/triage",
+        json={
+            "subject": "Sem acesso VPN administrativo",
+            "description": "Tecnico de infraestrutura perdeu acesso a VPN do bastion para atuar no ambiente.",
+            "service_name": "vpn",
+            "requester_role": "technician",
+            "requester_team": "infraestrutura",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["suggested_queue"] == "Infraestrutura-N1"
+    assert "ServiceDesk-Acessos" not in body["next_steps"][0]
+    assert "Infraestrutura-N1" in body["next_steps"][0]
+
+
 def test_open_ticket_applies_triage_when_priority_is_omitted() -> None:
     payload = {
         "subject": "Servico fora do ar",
@@ -1139,6 +1514,29 @@ def test_open_ticket_applies_triage_when_priority_is_omitted() -> None:
     assert body["triage"]["resolved_priority"] == "critical"
     assert body["routed_to"] == "NOC-Critico"
     assert "Resumo de triagem" in " ".join(body["notes"])
+
+
+def test_open_ticket_routes_operational_identity_access_ticket_to_infra_queue() -> None:
+    payload = {
+        "subject": "Sem acesso VPN administrativo",
+        "description": "Equipe de infraestrutura perdeu acesso a VPN do bastion para atender incidente.",
+        "service_name": "vpn",
+        "requester": {
+            "external_id": "tech-ana-souza",
+            "display_name": "Ana Souza",
+            "phone_number": "+5511912345678",
+            "role": "user",
+        },
+    }
+
+    response = client.post("/api/v1/helpdesk/tickets/open", json=payload)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["requester_role"] == "technician"
+    assert body["requester_team"] == "infraestrutura"
+    assert body["triage"]["suggested_queue"] == "Infraestrutura-N1"
+    assert body["routed_to"] == "Infraestrutura-N1"
 
 
 def test_open_ticket_generates_unique_mock_ids_even_when_time_source_repeats(

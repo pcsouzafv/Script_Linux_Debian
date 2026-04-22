@@ -137,6 +137,8 @@ class TicketTriageRequest(BaseModel):
     current_priority: TicketPriority | None = None
     asset_name: str | None = Field(default=None, max_length=120)
     service_name: str | None = Field(default=None, max_length=120)
+    requester_role: UserRole | None = None
+    requester_team: str | None = Field(default=None, max_length=120)
 
 
 class TicketTriageResponse(BaseModel):
@@ -304,6 +306,180 @@ class AutomationSummaryResponse(BaseModel):
     oldest_running_started_at: str | None = None
     oldest_retry_scheduled_at: str | None = None
     notes: list[str] = Field(default_factory=list)
+
+
+class TicketOperationsSummaryResponse(BaseModel):
+    storage_mode: str
+    total_tickets: int = 0
+    unresolved_backlog_count: int = 0
+    assigned_backlog_count: int = 0
+    unassigned_backlog_count: int = 0
+    high_priority_backlog_count: int = 0
+    resolved_ticket_count: int = 0
+    closed_ticket_count: int = 0
+    backlog_assignment_coverage_percent: float = 0.0
+    resolution_rate_percent: float = 0.0
+    average_correlation_event_count: float = 0.0
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    priority_counts: dict[str, int] = Field(default_factory=dict)
+    source_channel_counts: dict[str, int] = Field(default_factory=dict)
+    category_counts: dict[str, int] = Field(default_factory=dict)
+    routed_to_counts: dict[str, int] = Field(default_factory=dict)
+    oldest_backlog_updated_at: str | None = None
+    newest_snapshot_updated_at: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeHealthResponse(BaseModel):
+    status: str
+    service: str
+    environment: str
+    api_prefix: str
+    host: str
+    port: int
+
+
+class RuntimeServiceStatusResponse(BaseModel):
+    configured: bool
+    status: str
+    mode: str
+    base_url: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeMessagingStatusResponse(BaseModel):
+    delivery_provider: str
+    resolved_delivery_provider: str
+    configured: bool
+    meta_configured: bool = False
+    evolution_configured: bool = False
+    public_number: str | None = None
+    webhook_verify_token_configured: bool = False
+    signature_validation_enabled: bool = False
+    evolution_webhook_secret_configured: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeSessionResponse(BaseModel):
+    phone_number_masked: str
+    requester_display_name: str | None = None
+    flow_name: str
+    stage: str
+    selected_catalog_code: str | None = None
+    transcript_entries: int = 0
+    ticket_options_count: int = 0
+    updated_at: str
+
+
+class RuntimeSessionListResponse(BaseModel):
+    storage_mode: str
+    total_sessions: int = 0
+    sessions: list[RuntimeSessionResponse] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeAuditOverviewResponse(BaseModel):
+    storage_mode: str
+    retention_days: int | None = None
+    recent_event_count: int = 0
+    event_type_counts: dict[str, int] = Field(default_factory=dict)
+    source_channel_counts: dict[str, int] = Field(default_factory=dict)
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    recent_events: list[AuditEventResponse] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeOperationalStoreStatusResponse(BaseModel):
+    configured: bool
+    status: str
+    mode: str
+    schema_name: str
+    session_storage_mode: str
+    audit_storage_mode: str
+    audit_retention_days: int | None = None
+    job_retention_days: int | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeQueueStatusResponse(BaseModel):
+    configured: bool
+    status: str
+    mode: str
+    queue_key: str
+    dead_letter_queue_key: str
+    queue_depth: int = 0
+    dead_letter_queue_depth: int = 0
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeAutomationRunnerStatusResponse(BaseModel):
+    configured: bool
+    status: str
+    mode: str
+    base_dir: str
+    project_count: int = 0
+    available_projects: list[str] = Field(default_factory=list)
+    catalog_entry_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeDockerContainerResponse(BaseModel):
+    container_id: str
+    name: str
+    image: str
+    status: str
+    state: str
+    application_name: str | None = None
+    service_role: str
+    health_status: str | None = None
+    compose_project: str | None = None
+    compose_service: str | None = None
+    ports: str | None = None
+
+
+class RuntimeDockerApplicationResponse(BaseModel):
+    application_name: str
+    status: str
+    total_containers: int = 0
+    running_count: int = 0
+    unhealthy_count: int = 0
+    application_services: list[str] = Field(default_factory=list)
+    support_services: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeDockerOverviewResponse(BaseModel):
+    configured: bool
+    status: str
+    mode: str
+    binary_path: str | None = None
+    application_count: int = 0
+    total_containers: int = 0
+    running_count: int = 0
+    exited_count: int = 0
+    restarting_count: int = 0
+    unhealthy_count: int = 0
+    applications: list[RuntimeDockerApplicationResponse] = Field(default_factory=list)
+    containers: list[RuntimeDockerContainerResponse] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RuntimeOverviewResponse(BaseModel):
+    generated_at: str
+    health: RuntimeHealthResponse
+    identity_provider: str
+    glpi: RuntimeServiceStatusResponse
+    zabbix: RuntimeServiceStatusResponse
+    llm: LLMStatusResponse
+    messaging: RuntimeMessagingStatusResponse
+    operational_store: RuntimeOperationalStoreStatusResponse
+    queue: RuntimeQueueStatusResponse
+    automation_runner: RuntimeAutomationRunnerStatusResponse
+    docker: RuntimeDockerOverviewResponse
+    sessions: RuntimeSessionListResponse
+    audit: RuntimeAuditOverviewResponse
+    ticket_operations: TicketOperationsSummaryResponse
+    automation: AutomationSummaryResponse
 
 
 class TechnicianCommandResponse(BaseModel):

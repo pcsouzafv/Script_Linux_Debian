@@ -4,6 +4,8 @@
 
 Este checklist serve para conduzir a implantacao final com controle operacional. Ele foi pensado para uso em reuniao de liberacao, janela de mudanca ou war room.
 
+Ele pressupoe que os bloqueadores de entrega listados no [Checklist de fechamento do MVP](docs/fechamento-mvp.md) ja foram resolvidos ou aceitos explicitamente.
+
 ## Identificacao da mudanca
 
 - empresa:

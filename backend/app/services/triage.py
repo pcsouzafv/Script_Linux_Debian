@@ -1,4 +1,4 @@
-from app.schemas.helpdesk import TicketPriority, TicketTriageRequest, TicketTriageResponse
+from app.schemas.helpdesk import TicketPriority, TicketTriageRequest, TicketTriageResponse, UserRole
 from app.services.exceptions import IntegrationError
 from app.services.llm import LLMClient
 from app.services.ticket_analytics_store import TicketAnalyticsSnapshotRecord, TicketAnalyticsStore
@@ -98,17 +98,87 @@ CATEGORY_ANALYTICS_LABELS = {
 }
 
 RESOLUTION_STATUS_BONUS = {"solved", "closed"}
+OPERATIONAL_TEAMS = {"infraestrutura", "plataforma", "operacoes", "operações", "ops"}
+SERVICE_DESK_TEAMS = {"service-desk", "service desk", "service_desk", "atendimento"}
+INFRA_ROUTING_KEYWORDS = {
+    "vpn",
+    "dns",
+    "firewall",
+    "servidor",
+    "host",
+    "vm",
+    "docker",
+    "container",
+    "kubernetes",
+    "cluster",
+    "redis",
+    "postgres",
+    "mysql",
+    "banco",
+    "api",
+    "backend",
+    "zabbix",
+    "glpi",
+    "infra",
+    "infraestrutura",
+    "plataforma",
+    "deploy",
+}
 
 
-def resolve_helpdesk_queue(category: str | None, priority: TicketPriority) -> str:
+def resolve_helpdesk_queue(
+    category: str | None,
+    priority: TicketPriority,
+    *,
+    requester_role: UserRole | None = None,
+    requester_team: str | None = None,
+    service_name: str | None = None,
+    asset_name: str | None = None,
+    subject: str | None = None,
+    description: str | None = None,
+) -> str:
     normalized_category = (category or "").strip().lower()
+    normalized_team = _normalize_team(requester_team)
+    context_text = " ".join(
+        value
+        for value in (subject, description, service_name, asset_name, normalized_category)
+        if value
+    ).lower()
+
     if priority is TicketPriority.CRITICAL:
         return "NOC-Critico"
+    if (
+        normalized_category in ACCESS_CATEGORIES
+        and _is_operational_requester(requester_role, normalized_team)
+        and _targets_infrastructure(context_text)
+    ):
+        return "Infraestrutura-N1"
     if normalized_category in ACCESS_CATEGORIES:
         return "ServiceDesk-Acessos"
     if normalized_category in INFRA_CATEGORIES:
         return "Infraestrutura-N1"
+    if _is_operational_requester(requester_role, normalized_team) and _targets_infrastructure(context_text):
+        return "Infraestrutura-N1"
     return "ServiceDesk-N1"
+
+
+def _normalize_team(team: str | None) -> str:
+    return (team or "").strip().lower()
+
+
+def _is_operational_requester(
+    requester_role: UserRole | None,
+    normalized_team: str,
+) -> bool:
+    if normalized_team in SERVICE_DESK_TEAMS:
+        return False
+    if normalized_team in OPERATIONAL_TEAMS:
+        return True
+    return requester_role in {UserRole.TECHNICIAN, UserRole.ADMIN}
+
+
+def _targets_infrastructure(context_text: str) -> bool:
+    return any(keyword in context_text for keyword in INFRA_ROUTING_KEYWORDS)
 
 
 class TriageAgent:
@@ -126,14 +196,33 @@ class TriageAgent:
         suggested_priority = self._suggest_priority(text, payload.current_priority)
         resolved_category = payload.current_category or suggested_category
         resolved_priority = payload.current_priority or suggested_priority
+        default_queue = resolve_helpdesk_queue(resolved_category, resolved_priority)
+        suggested_queue = resolve_helpdesk_queue(
+            resolved_category,
+            resolved_priority,
+            requester_role=payload.requester_role,
+            requester_team=payload.requester_team,
+            service_name=payload.service_name,
+            asset_name=payload.asset_name,
+            subject=payload.subject,
+            description=payload.description,
+        )
         summary = self._build_summary(payload, resolved_category, resolved_priority)
-        next_steps = self._build_next_steps(resolved_category)
+        next_steps = self._build_next_steps(resolved_category, suggested_queue)
         confidence = self._estimate_confidence(
             text=text,
             category_score=category_score,
             payload=payload,
         )
         notes = self._build_notes(payload, suggested_category, suggested_priority)
+        notes.extend(
+            self._build_queue_notes(
+                payload=payload,
+                resolved_category=resolved_category,
+                default_queue=default_queue,
+                suggested_queue=suggested_queue,
+            )
+        )
         resolution_hints, similar_incidents, resolution_notes = await self._build_resolution_context(
             payload=payload,
             category=resolved_category,
@@ -146,13 +235,14 @@ class TriageAgent:
             payload=payload,
             suggested_category=suggested_category,
             suggested_priority=suggested_priority,
+            suggested_queue=suggested_queue,
             resolution_hints=resolution_hints,
             similar_incidents=similar_incidents,
         )
         notes.extend(llm_notes)
         if llm_summary or llm_steps:
             summary = llm_summary or summary
-            next_steps = llm_steps or next_steps
+            next_steps = self._align_next_steps_with_queue(llm_steps or next_steps, suggested_queue)
             mode = "hybrid"
 
         return TicketTriageResponse(
@@ -162,7 +252,7 @@ class TriageAgent:
             suggested_priority=suggested_priority,
             resolved_category=resolved_category,
             resolved_priority=resolved_priority,
-            suggested_queue=resolve_helpdesk_queue(resolved_category, resolved_priority),
+            suggested_queue=suggested_queue,
             confidence=confidence,
             summary=summary,
             next_steps=next_steps,
@@ -181,6 +271,8 @@ class TriageAgent:
                 payload.asset_name,
                 payload.service_name,
                 payload.current_category,
+                payload.requester_team,
+                payload.requester_role.value if payload.requester_role is not None else None,
             )
             if value
         ).lower()
@@ -240,8 +332,14 @@ class TriageAgent:
             f"{priority.value} relacionado a {focus}. Resumo: {base_summary}"
         )
 
-    def _build_next_steps(self, category: str | None) -> list[str]:
+    def _build_next_steps(self, category: str | None, queue: str) -> list[str]:
         normalized_category = (category or "").strip().lower()
+        if normalized_category in ACCESS_CATEGORIES and queue == "Infraestrutura-N1":
+            return [
+                "Confirmar se o bloqueio afeta acesso operacional a VPN, bastion, host, API ou ferramenta de infraestrutura.",
+                "Validar grupo, perfil tecnico, MFA e credenciais do servico ou ambiente administrativo envolvido.",
+                "Direcionar para Infraestrutura-N1 com o contexto operacional do solicitante e o ativo ou servico afetado.",
+            ]
         if normalized_category in ACCESS_CATEGORIES:
             return [
                 "Confirmar usuario afetado, horario de inicio e escopo do bloqueio.",
@@ -295,6 +393,25 @@ class TriageAgent:
         else:
             notes.append(f"Prioridade sugerida automaticamente: {suggested_priority.value}.")
         return notes
+
+    def _build_queue_notes(
+        self,
+        *,
+        payload: TicketTriageRequest,
+        resolved_category: str | None,
+        default_queue: str,
+        suggested_queue: str,
+    ) -> list[str]:
+        if suggested_queue == default_queue:
+            return []
+
+        role_label = payload.requester_role.value if payload.requester_role is not None else "unknown"
+        team_label = payload.requester_team or "sem-time"
+        category_label = resolved_category or "geral"
+        return [
+            "Fila ajustada pelo contexto do solicitante. "
+            f"Categoria {category_label}, papel {role_label} e time {team_label} direcionaram para {suggested_queue}."
+        ]
 
     async def _build_resolution_context(
         self,
@@ -437,6 +554,7 @@ class TriageAgent:
         payload: TicketTriageRequest,
         suggested_category: str | None,
         suggested_priority: TicketPriority,
+        suggested_queue: str,
         resolution_hints: list[str],
         similar_incidents: list[str],
     ) -> tuple[str | None, list[str], list[str]]:
@@ -456,6 +574,7 @@ class TriageAgent:
             f"Servico: {payload.service_name or 'n/a'}\n"
             f"Categoria sugerida: {suggested_category or 'n/a'}\n"
             f"Prioridade sugerida: {suggested_priority.value}\n"
+            f"Fila final prevista: {suggested_queue}\n"
             f"Dicas de resolucao recuperadas: {' | '.join(resolution_hints) if resolution_hints else 'n/a'}\n"
             f"Casos similares recentes: {' | '.join(similar_incidents) if similar_incidents else 'n/a'}"
         )
@@ -465,6 +584,7 @@ class TriageAgent:
                 user_prompt=prompt,
                 system_prompt=(
                     "Voce faz apenas triagem segura para helpdesk. "
+                    "Nao contradiga a fila final prevista quando ela ja estiver definida. "
                     "Resuma o incidente e proponha proximos passos de baixo risco."
                 ),
                 max_tokens=220,
@@ -489,6 +609,14 @@ class TriageAgent:
             return None, [], ["LLM retornou formato fora do contrato de triagem; usando heuristicas locais."]
 
         return summary, next_steps[:3], [f"Triagem enriquecida pelo provider {result.provider}."]
+
+    def _align_next_steps_with_queue(self, steps: list[str], queue: str) -> list[str]:
+        if queue == "Infraestrutura-N1":
+            return [
+                step.replace("ServiceDesk-Acessos", queue).replace("ServiceDesk-N1", queue)
+                for step in steps
+            ]
+        return steps
 
     def _first_sentence(self, text: str) -> str:
         sanitized = " ".join(text.split())
