@@ -21,6 +21,7 @@ Leitura curta:
 - a plataforma ja consegue enriquecer triagem com historico e sugerir resolucao por ticket;
 - a fila administrativa ja tem resumo operacional proprio;
 - a primeira fatia de relatorio operacional de tickets ja existe via resumo agregado de `ticket_analytics_snapshot`;
+- ja existe uma heuristica inicial de incidente em massa no resumo operacional de tickets e no painel `/ops`, agrupando tickets nao resolvidos por servico ou ativo dentro de uma janela curta;
 - a parte mais visivel da Fase 5 ainda nao foi fechada: relatorios completos, incidentes em massa, pos-mortem e camada real de conhecimento.
 
 ## O que ja existe hoje
@@ -111,7 +112,28 @@ Ainda nao cobre de forma completa:
 - taxa de atendimento, reabertura e encaminhamento;
 - eficiencia operacional por janela, fila ou time.
 
-### 2. Recomendacoes por historico e recorrencia
+### 2. Deteccao inicial de incidentes em massa
+
+Agora ja existe a primeira heuristica operacional de incidente em massa.
+
+Ja cobre:
+
+- agrupamento de tickets nao resolvidos por `service_name` ou `asset_name`;
+- janela curta de observacao baseada em `source_updated_at` ou `snapshot_updated_at`;
+- contagem de tickets, tickets de alta prioridade e backlog sem atribuicao por agrupamento;
+- exposicao em `GET /api/v1/helpdesk/reports/tickets/summary` e no painel `GET /ops`.
+
+Regra atual:
+
+- o backend marca um candidato quando encontra pelo menos 3 tickets nao resolvidos do mesmo servico ou ativo dentro de 4 horas, preservando categoria e fila operacional como contexto.
+
+Ainda falta:
+
+- correlacionar localidade, cluster, item de inventario e dependencias tecnicas;
+- sugerir automaticamente incidente pai ou correlacao no GLPI;
+- cruzar essa heuristica com eventos do Zabbix e com stacks Docker monitorados.
+
+### 3. Recomendacoes por historico e recorrencia
 
 Hoje a plataforma ja usa casos similares para enriquecer triagem e resolucao, mas ainda no nivel de advice por ticket.
 
@@ -126,7 +148,7 @@ Ainda falta:
 - produzir recomendacao operacional agregada, nao so contextual ao ticket atual;
 - expor isso como relatorio, dashboard ou endpoint administrativo especifico.
 
-### 3. Enriquecimento analitico do GLPI
+### 4. Enriquecimento analitico do GLPI
 
 O snapshot existe, mas a entrada ainda e mais pobre do que deveria.
 
@@ -136,7 +158,7 @@ Gap principal atual:
 
 Sem isso, a Fase 5 fica com boa estrutura de leitura, mas com qualidade de dado abaixo do ideal para BI, recorrencia e correlacao mais forte.
 
-### 4. Observabilidade da plataforma
+### 5. Observabilidade da plataforma
 
 Hoje existe o escopo e a direcao em `infra/observability/README.md`, mas ainda nao ha stack versionada de observabilidade da propria plataforma.
 
@@ -149,15 +171,11 @@ Ainda faltam:
 
 ## O que ainda nao apareceu no repositorio
 
-### 1. Deteccao de incidentes em massa
-
-Nao ha implementacao dedicada em `backend/app/` ou `backend/tests/` para agrupar incidentes por servico, localidade, cluster, ativo ou janela de tempo e sugerir incidente pai.
-
-### 2. Pos-mortem semi-automatico
+### 1. Pos-mortem semi-automatico
 
 Nao ha fluxo dedicado para consolidar historico de ticket, auditoria, followups, solution e eventos em um resumo de pos-incidente reutilizavel.
 
-### 3. Camada real de conhecimento
+### 2. Camada real de conhecimento
 
 Nao ha ainda base de conhecimento indexada, `RAG`, indice vetorial nem servico proprio de consulta a FAQ e runbooks.
 
@@ -177,7 +195,7 @@ Nao ha ainda base de conhecimento indexada, `RAG`, indice vetorial nem servico p
 
 ### Bloco 3: entregar inteligencia operacional
 
-1. Implementar deteccao de incidentes em massa por heuristica inicial.
+1. Evoluir a heuristica de incidente em massa para cluster, localidade, item e correlacao com Zabbix/Docker.
 2. Consolidar recorrencia por servico, categoria, ativo e fila.
 3. Gerar recomendacoes operacionais agregadas, nao apenas por ticket isolado.
 

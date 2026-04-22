@@ -11,6 +11,7 @@ from app.schemas.helpdesk import (
     CorrelationRequest,
     CorrelationResponse,
     IdentityLookupResponse,
+    MassIncidentCandidateResponse,
     NormalizedWhatsAppMessage,
     OperationalAssistantResponse,
     RequesterIdentity,
@@ -914,6 +915,33 @@ class HelpdeskOrchestrator:
             source_channel_counts=summary.source_channel_counts,
             category_counts=summary.category_counts,
             routed_to_counts=summary.routed_to_counts,
+            mass_incident_candidate_count=summary.mass_incident_candidate_count,
+            mass_incident_candidates=[
+                MassIncidentCandidateResponse(
+                    scope=item.scope,
+                    correlation_key=item.correlation_key,
+                    label=item.label,
+                    category_name=item.category_name,
+                    routed_to=item.routed_to,
+                    ticket_count=item.ticket_count,
+                    high_priority_ticket_count=item.high_priority_ticket_count,
+                    unassigned_ticket_count=item.unassigned_ticket_count,
+                    oldest_ticket_updated_at=(
+                        item.oldest_ticket_updated_at.isoformat()
+                        if item.oldest_ticket_updated_at is not None
+                        else None
+                    ),
+                    newest_ticket_updated_at=(
+                        item.newest_ticket_updated_at.isoformat()
+                        if item.newest_ticket_updated_at is not None
+                        else None
+                    ),
+                    ticket_ids=item.ticket_ids,
+                    sample_subjects=item.sample_subjects,
+                    notes=item.notes,
+                )
+                for item in summary.mass_incident_candidates
+            ],
             oldest_backlog_updated_at=(
                 summary.oldest_backlog_updated_at.isoformat()
                 if summary.oldest_backlog_updated_at is not None

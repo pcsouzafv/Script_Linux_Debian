@@ -308,6 +308,22 @@ class AutomationSummaryResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class MassIncidentCandidateResponse(BaseModel):
+    scope: str
+    correlation_key: str
+    label: str
+    category_name: str | None = None
+    routed_to: str | None = None
+    ticket_count: int = 0
+    high_priority_ticket_count: int = 0
+    unassigned_ticket_count: int = 0
+    oldest_ticket_updated_at: str | None = None
+    newest_ticket_updated_at: str | None = None
+    ticket_ids: list[str] = Field(default_factory=list)
+    sample_subjects: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class TicketOperationsSummaryResponse(BaseModel):
     storage_mode: str
     total_tickets: int = 0
@@ -325,6 +341,8 @@ class TicketOperationsSummaryResponse(BaseModel):
     source_channel_counts: dict[str, int] = Field(default_factory=dict)
     category_counts: dict[str, int] = Field(default_factory=dict)
     routed_to_counts: dict[str, int] = Field(default_factory=dict)
+    mass_incident_candidate_count: int = 0
+    mass_incident_candidates: list[MassIncidentCandidateResponse] = Field(default_factory=list)
     oldest_backlog_updated_at: str | None = None
     newest_snapshot_updated_at: str | None = None
     notes: list[str] = Field(default_factory=list)

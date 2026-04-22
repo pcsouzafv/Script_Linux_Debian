@@ -224,6 +224,56 @@ def test_ticket_operations_summary_route_returns_backlog_distribution() -> None:
     assert body["newest_snapshot_updated_at"] is not None
 
 
+def test_ticket_operations_summary_route_returns_mass_incident_candidates() -> None:
+    store = TicketAnalyticsStore(get_settings())
+    now = datetime.now(timezone.utc)
+
+    for index, priority in enumerate(("critical", "high", "medium"), start=1):
+        asyncio.run(
+            store.upsert_snapshot(
+                TicketAnalyticsSnapshotRecord(
+                    ticket_id=f"60{index}",
+                    subject=f"ERP fora do ar na operacao {index}",
+                    description="Origem: API",
+                    status="processing" if index == 2 else "new",
+                    priority=priority,
+                    requester_glpi_user_id=10 + index,
+                    assigned_glpi_user_id=500 + index if index == 2 else None,
+                    external_id=f"helpdesk-api-60{index}",
+                    request_type_id=1,
+                    request_type_name="Direct",
+                    category_id=1,
+                    category_name="Infra",
+                    asset_name=f"erp-node-0{index}",
+                    service_name="erp-core",
+                    source_channel="api",
+                    routed_to="Infraestrutura-N1",
+                    correlation_event_count=index,
+                    source_updated_at=now - timedelta(minutes=index * 15),
+                )
+            )
+        )
+
+    response = client.get(
+        "/api/v1/helpdesk/reports/tickets/summary",
+        headers=AUDIT_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mass_incident_candidate_count"] == 1
+    candidate = body["mass_incident_candidates"][0]
+    assert candidate["scope"] == "service"
+    assert candidate["category_name"] == "Infra"
+    assert candidate["routed_to"] == "Infraestrutura-N1"
+    assert candidate["ticket_count"] == 3
+    assert candidate["high_priority_ticket_count"] == 2
+    assert candidate["unassigned_ticket_count"] == 2
+    assert candidate["ticket_ids"] == ["601", "602", "603"]
+    assert candidate["sample_subjects"][0] == "ERP fora do ar na operacao 1"
+    assert candidate["notes"]
+
+
 def test_runtime_overview_route_requires_automation_read_scope_alongside_audit_scope() -> None:
     response = client.get(
         "/api/v1/helpdesk/runtime/overview",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import re
 from typing import Any
@@ -70,14 +70,35 @@ class TicketAnalyticsSummaryResult:
     source_channel_counts: dict[str, int] = field(default_factory=dict)
     category_counts: dict[str, int] = field(default_factory=dict)
     routed_to_counts: dict[str, int] = field(default_factory=dict)
+    mass_incident_candidate_count: int = 0
+    mass_incident_candidates: list["MassIncidentCandidateRecord"] = field(default_factory=list)
     oldest_backlog_updated_at: datetime | None = None
     newest_snapshot_updated_at: datetime | None = None
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class MassIncidentCandidateRecord:
+    scope: str
+    correlation_key: str
+    label: str
+    category_name: str | None
+    routed_to: str | None
+    ticket_count: int
+    high_priority_ticket_count: int
+    unassigned_ticket_count: int
+    oldest_ticket_updated_at: datetime | None = None
+    newest_ticket_updated_at: datetime | None = None
+    ticket_ids: list[str] = field(default_factory=list)
+    sample_subjects: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
 
 _MEMORY_TICKET_ANALYTICS: dict[str, TicketAnalyticsSnapshotRecord] = {}
 RESOLVED_TICKET_STATUSES = {"solved", "closed"}
 HIGH_PRIORITY_VALUES = {"high", "critical"}
+MASS_INCIDENT_MIN_TICKETS = 3
+MASS_INCIDENT_LOOKBACK_HOURS = 4
 
 
 def clear_memory_ticket_analytics() -> None:
@@ -399,8 +420,14 @@ class TicketAnalyticsStore:
         resolved_ticket_count = 0
         closed_ticket_count = 0
         correlation_total = 0
+        mass_incident_groups: dict[
+            tuple[str, str, str, str],
+            list[TicketAnalyticsSnapshotRecord],
+        ] = {}
         oldest_backlog_updated_at: datetime | None = None
         newest_snapshot_updated_at: datetime | None = None
+        now = datetime.now(timezone.utc)
+        mass_incident_cutoff = now - timedelta(hours=MASS_INCIDENT_LOOKBACK_HOURS)
 
         for record in records:
             normalized_status = self._normalize_count_key(record.status)
@@ -439,6 +466,13 @@ class TicketAnalyticsStore:
                     unassigned_backlog_count += 1
                 if normalized_priority in HIGH_PRIORITY_VALUES:
                     high_priority_backlog_count += 1
+                mass_incident_group_key = self._build_mass_incident_group_key(record)
+                if (
+                    mass_incident_group_key is not None
+                    and updated_reference is not None
+                    and updated_reference >= mass_incident_cutoff
+                ):
+                    mass_incident_groups.setdefault(mass_incident_group_key, []).append(record)
 
         backlog_assignment_coverage_percent = 0.0
         if unresolved_backlog_count > 0:
@@ -458,6 +492,8 @@ class TicketAnalyticsStore:
         if total_tickets > 0:
             average_correlation_event_count = round(correlation_total / total_tickets, 2)
 
+        mass_incident_candidates = self._build_mass_incident_candidates(mass_incident_groups)
+
         return TicketAnalyticsSummaryResult(
             storage_mode=storage_mode,
             total_tickets=total_tickets,
@@ -475,9 +511,107 @@ class TicketAnalyticsStore:
             source_channel_counts=source_channel_counts,
             category_counts=category_counts,
             routed_to_counts=routed_to_counts,
+            mass_incident_candidate_count=len(mass_incident_candidates),
+            mass_incident_candidates=mass_incident_candidates,
             oldest_backlog_updated_at=oldest_backlog_updated_at,
             newest_snapshot_updated_at=newest_snapshot_updated_at,
             notes=notes or [],
+        )
+
+    def _build_mass_incident_group_key(
+        self,
+        record: TicketAnalyticsSnapshotRecord,
+    ) -> tuple[str, str, str, str] | None:
+        normalized_category = self._optional_string(record.category_name) or "Sem categoria"
+        normalized_routed_to = self._optional_string(record.routed_to) or "Sem fila definida"
+        normalized_service_name = self._optional_string(record.service_name)
+        normalized_asset_name = self._optional_string(record.asset_name)
+
+        if normalized_service_name:
+            return (
+                "service",
+                normalized_service_name.casefold(),
+                normalized_category,
+                normalized_routed_to,
+            )
+        if normalized_asset_name:
+            return (
+                "asset",
+                normalized_asset_name.casefold(),
+                normalized_category,
+                normalized_routed_to,
+            )
+        return None
+
+    def _build_mass_incident_candidates(
+        self,
+        grouped_records: dict[tuple[str, str, str, str], list[TicketAnalyticsSnapshotRecord]],
+    ) -> list[MassIncidentCandidateRecord]:
+        candidates: list[MassIncidentCandidateRecord] = []
+
+        for (scope, normalized_target, category_name, routed_to), records in grouped_records.items():
+            if len(records) < MASS_INCIDENT_MIN_TICKETS:
+                continue
+
+            sorted_records = sorted(
+                records,
+                key=lambda item: (
+                    item.source_updated_at
+                    or item.snapshot_updated_at
+                    or datetime.min.replace(tzinfo=timezone.utc)
+                ),
+                reverse=True,
+            )
+            high_priority_ticket_count = sum(
+                1
+                for item in records
+                if self._normalize_count_key(item.priority) in HIGH_PRIORITY_VALUES
+            )
+            unassigned_ticket_count = sum(
+                1 for item in records if item.assigned_glpi_user_id is None
+            )
+            oldest_ticket_updated_at: datetime | None = None
+            newest_ticket_updated_at: datetime | None = None
+            for item in records:
+                reference = item.source_updated_at or item.snapshot_updated_at
+                oldest_ticket_updated_at = self._min_datetime(oldest_ticket_updated_at, reference)
+                newest_ticket_updated_at = self._max_datetime(newest_ticket_updated_at, reference)
+
+            scope_label = "servico" if scope == "service" else "ativo"
+            notes = [
+                f"Heuristica inicial: {len(records)} tickets nao resolvidos do mesmo {scope_label} em ate {MASS_INCIDENT_LOOKBACK_HOURS} horas.",
+            ]
+            if high_priority_ticket_count > 0:
+                notes.append(
+                    f"{high_priority_ticket_count} ticket(s) desta agrupacao estao com prioridade alta ou critica."
+                )
+
+            candidates.append(
+                MassIncidentCandidateRecord(
+                    scope=scope,
+                    correlation_key=f"{scope}:{normalized_target}:{category_name}:{routed_to}",
+                    label=f"{scope_label.title()}: {normalized_target} | fila: {routed_to}",
+                    category_name=category_name,
+                    routed_to=routed_to,
+                    ticket_count=len(records),
+                    high_priority_ticket_count=high_priority_ticket_count,
+                    unassigned_ticket_count=unassigned_ticket_count,
+                    oldest_ticket_updated_at=oldest_ticket_updated_at,
+                    newest_ticket_updated_at=newest_ticket_updated_at,
+                    ticket_ids=[item.ticket_id for item in sorted_records[:10]],
+                    sample_subjects=[item.subject for item in sorted_records[:3]],
+                    notes=notes,
+                )
+            )
+
+        return sorted(
+            candidates,
+            key=lambda item: (
+                item.ticket_count,
+                item.high_priority_ticket_count,
+                item.newest_ticket_updated_at or datetime.min.replace(tzinfo=timezone.utc),
+            ),
+            reverse=True,
         )
 
     def _normalize_count_key(self, value: object) -> str:

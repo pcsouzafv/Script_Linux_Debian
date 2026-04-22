@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from app.core.config import Settings
 from app.services.ticket_analytics_store import TicketAnalyticsSnapshotRecord, TicketAnalyticsStore
@@ -134,3 +135,50 @@ def test_memory_snapshot_store_summarizes_operational_ticket_metrics() -> None:
     assert summary.category_counts["Acesso"] == 1
     assert summary.oldest_backlog_updated_at is not None
     assert summary.newest_snapshot_updated_at is not None
+
+
+def test_memory_snapshot_store_detects_mass_incident_candidates_by_service() -> None:
+    store = TicketAnalyticsStore(Settings(_env_file=None, operational_postgres_dsn=None))
+    now = datetime.now(timezone.utc)
+
+    for index, priority in enumerate(("critical", "high", "medium"), start=1):
+        asyncio.run(
+            store.upsert_snapshot(
+                TicketAnalyticsSnapshotRecord(
+                    ticket_id=f"70{index}",
+                    subject=f"VPN indisponivel para a filial {index}",
+                    description="Origem: WhatsApp",
+                    status="new",
+                    priority=priority,
+                    requester_glpi_user_id=20 + index,
+                    assigned_glpi_user_id=None if index != 2 else 200,
+                    external_id=f"helpdesk-whatsapp-70{index}",
+                    request_type_id=3,
+                    request_type_name="Phone",
+                    category_id=5,
+                    category_name="Infra",
+                    asset_name=f"vpn-edge-0{index}",
+                    service_name="vpn-core",
+                    source_channel="whatsapp",
+                    routed_to="Infraestrutura-N1",
+                    correlation_event_count=index,
+                    source_updated_at=now - timedelta(minutes=index * 20),
+                )
+            )
+        )
+
+    summary = asyncio.run(store.summarize_snapshots())
+
+    assert summary.mass_incident_candidate_count == 1
+    candidate = summary.mass_incident_candidates[0]
+    assert candidate.scope == "service"
+    assert candidate.category_name == "Infra"
+    assert candidate.routed_to == "Infraestrutura-N1"
+    assert candidate.ticket_count == 3
+    assert candidate.high_priority_ticket_count == 2
+    assert candidate.unassigned_ticket_count == 2
+    assert candidate.ticket_ids == ["701", "702", "703"]
+    assert candidate.sample_subjects[0] == "VPN indisponivel para a filial 1"
+    assert candidate.oldest_ticket_updated_at is not None
+    assert candidate.newest_ticket_updated_at is not None
+    assert candidate.notes

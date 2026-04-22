@@ -356,6 +356,12 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
         </article>
 
         <article class="panel span-12">
+          <h2>Incidentes em massa</h2>
+          <div class="muted" id="mass-incident-summary">Sem leitura de agrupamentos operacionais.</div>
+          <div id="mass-incident-table"></div>
+        </article>
+
+        <article class="panel span-12">
           <h2>Containers Docker</h2>
           <div class="muted" id="docker-summary">Sem leitura dos containers.</div>
           <div id="docker-apps-table"></div>
@@ -391,6 +397,8 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
       const messagingList = document.getElementById("messaging-list");
       const ticketKpis = document.getElementById("ticket-kpis");
       const ticketDistribution = document.getElementById("ticket-distribution");
+      const massIncidentSummary = document.getElementById("mass-incident-summary");
+      const massIncidentTable = document.getElementById("mass-incident-table");
       const automationKpis = document.getElementById("automation-kpis");
       const automationDistribution = document.getElementById("automation-distribution");
       const dockerSummary = document.getElementById("docker-summary");
@@ -512,6 +520,25 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
           ["Resolvidos", data.ticket_operations.resolved_ticket_count],
           ["Canal dominante", Object.entries(data.ticket_operations.source_channel_counts || {})[0]?.join(" = ") || "n/a"],
         ]);
+        massIncidentSummary.textContent = `${data.ticket_operations.mass_incident_candidate_count || 0} candidato(s) detectado(s) pela heuristica inicial de agrupamento.`;
+        renderSimpleTable(
+          massIncidentTable,
+          [
+            { key: "label", label: "Agrupamento" },
+            { key: "category_name", label: "Categoria" },
+            { key: "routed_to", label: "Fila" },
+            { key: "ticket_count", label: "Tickets" },
+            { key: "high_priority_ticket_count", label: "Alta prioridade" },
+            { key: "ticket_ids", label: "Tickets amostrados" },
+            { key: "notes", label: "Regra" },
+          ],
+          (data.ticket_operations.mass_incident_candidates || []).map((candidate) => ({
+            ...candidate,
+            ticket_ids: (candidate.ticket_ids || []).join(", ") || "-",
+            notes: (candidate.notes || []).join(" | ") || "-",
+          })),
+          "Nenhum incidente em massa candidato na janela heuristica atual.",
+        );
 
         renderKpis(automationKpis, [
           { label: "Jobs totais", value: data.automation.total_jobs },
