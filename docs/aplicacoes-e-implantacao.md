@@ -19,16 +19,16 @@ As automacoes completas exigem uma topologia por camadas.
 | ITSM | GLPI | Tickets, filas, SLA, usuarios, inventario e ativos | Instalado pelo script base |
 | Observabilidade | Zabbix Server + Frontend + Agent | Eventos, triggers, hosts e correlacao inicial | Instalado pelo script base |
 | Orquestracao | Backend FastAPI | Regras, RBAC, webhooks, correlacao e integracoes | Ja implementado em `backend/` |
-| Canal conversacional | WhatsApp Business API ou provedor homologado | Entrada e saida de mensagens | Integracao prevista; depende de credenciais externas |
+| Canal conversacional | WhatsApp Business API ou provedor homologado | Entrada e saida de mensagens | Backend ja suporta webhook Meta, webhook Evolution e entrega de resposta; depende de credenciais externas para operar em modo real |
 | Execucao segura | Worker seguro + runner externo homologado | Rodar automacoes homologadas com auditoria, aprovacao por risco e sem shell arbitrario | Worker inicial ja implementado no backend; runner externo homologado ja validado para smoke test local e probe vinculado a ticket |
 | Persistencia operacional | PostgreSQL | Sessao, auditoria, estado, cache funcional | Provisionamento de laboratorio em `infra/helpdesk-lab` e integracao inicial no backend para sessao e auditoria minima |
 | Fila e tarefas | Redis ou RabbitMQ + worker | Jobs assincronos, retentativas, fila de automacoes | Redis provisionado para laboratorio em `infra/helpdesk-lab`, worker inicial conectado no backend e ciclo de retry com backoff persistido + dead-letter ja implementado |
-| IA e conhecimento | LangGraph + RAG + indice vetorial | Triagem, resumo, classificacao e busca contextual | Planejado para fases futuras |
+| IA e conhecimento | LangChain/LangGraph + RAG + indice vetorial | Triagem, resumo, classificacao, agentes e busca contextual | Planejado para fases futuras |
 | Observabilidade da propria plataforma | Prometheus, Grafana, Loki ou equivalente | Monitorar o backend e os jobs | Planejado para fases futuras |
 
 ## O que o instalador atual faz e o que ele nao faz
 
-O script [install_debian12_full_stack.sh](/home/ricardo/Script_Linux_Debian/install_debian12_full_stack.sh) prepara um host dedicado com:
+O script [install_debian12_full_stack.sh](../install_debian12_full_stack.sh) prepara um host dedicado com:
 
 - Apache e PHP para o frontend do GLPI e do Zabbix;
 - MariaDB para bancos locais;
@@ -74,6 +74,15 @@ Ligar o backend aos sistemas oficiais.
 - Configurar webhook e credenciais do WhatsApp Business.
 - Publicar o backend via reverse proxy ou tunel controlado, sem expor servicos internos desnecessarios.
 
+Leitura pratica para o canal WhatsApp:
+
+- o backend ja aceita `GET /api/v1/webhooks/whatsapp/verify` para verificacao da Meta;
+- o backend ja aceita `POST /api/v1/webhooks/whatsapp/meta` e `POST /api/v1/webhooks/whatsapp/evolution`;
+- o backend ja consegue responder por Meta, Evolution ou `mock`;
+- o passo operacional agora e preencher credenciais, publicar o endpoint e validar a identidade por telefone no GLPI.
+
+Para a ativacao guiada do canal, use [Ativacao do Canal WhatsApp](ativacao-whatsapp.md).
+
 ### Fase 4: Camada de automacao segura
 
 Status atual: concluida no escopo atual do repositorio.
@@ -105,6 +114,7 @@ Acrescentar a camada de triagem e assistencia.
 - Evoluir a fila ja existente, que hoje ja tem retry com backoff persistido, dead-letter e runner externo homologado, para observabilidade operacional mais rica.
 - Indexar FAQ, artigos e runbooks.
 - Adicionar agentes apenas para resumo, classificacao e sugestao antes de liberar automacoes mais sensiveis.
+- Quando a camada de IA evoluir, manter o cliente LLM atual como base de provider e usar `LangChain` ou `LangGraph` acima dele, na camada de conhecimento, RAG e orquestracao de ferramentas, sem acoplar o fluxo transacional principal do GLPI diretamente a uma biblioteca de agentes.
 
 Leitura pratica do status:
 
@@ -114,6 +124,7 @@ Leitura pratica do status:
 - quando um ticket e marcado como `solved`, o backend ja pode registrar uma `solution` estruturada no GLPI e reutilizar esse historico nas proximas recomendacoes da IA;
 - banco operacional, auditoria duravel e snapshot analitico ja existem;
 - fila operacional e retry persistido ja existem;
+- o laboratorio GLPI agora pode ser enriquecido com grupos de fila, grupos de time, localizacoes, tarefas e solucoes para dar base melhor a automacao assistida e futuros fluxos com `LangChain` ou `LangGraph`;
 - ainda faltam a camada real de conhecimento, indexacao, agentes de resumo/classificacao e relatorios operacionais mais completos.
 
 ## Topologia minima recomendada para o MVP
@@ -169,9 +180,9 @@ O repositorio agora ja conta com a pasta `infra/` como ponto unico para evoluir 
 ├── install_debian12_full_stack.sh
 ```
 
-O guia raiz fica em [infra/README.md](/home/ricardo/Script_Linux_Debian/infra/README.md) e cada subpasta delimita o escopo de implantacao do seu respectivo componente.
+O guia raiz fica em [infra/README.md](../infra/README.md) e cada subpasta delimita o escopo de implantacao do seu respectivo componente.
 
-Para laboratorio local em desktop, o repositorio agora tambem inclui [infra/helpdesk-lab/README.md](/home/ricardo/Script_Linux_Debian/infra/helpdesk-lab/README.md), com um `Docker Compose` isolado para `GLPI + Zabbix + PostgreSQL + Redis` sem tocar nos containers ja existentes do host.
+Para laboratorio local em desktop, o repositorio agora tambem inclui [infra/helpdesk-lab/README.md](../infra/helpdesk-lab/README.md), com um `Docker Compose` isolado para `GLPI + Zabbix + PostgreSQL + Redis` sem tocar nos containers ja existentes do host.
 
 ## Decisao pratica para agora
 
@@ -182,4 +193,4 @@ O caminho mais pragmatico e tratar o projeto em dois blocos imediatos:
 
 Depois disso, a implantacao das automacoes deve entrar como um terceiro bloco separado, com ferramenta propria de execucao e politica de aprovacao.
 
-Para transformar o estado atual em um MVP pronto para piloto controlado, use o [Checklist de fechamento do MVP](docs/fechamento-mvp.md) como referencia unica de lacunas de entrega, e deixe o [Checklist executivo de go-live](docs/checklist-go-live.md) apenas para a janela final de liberacao.
+Para transformar o estado atual em um MVP pronto para piloto controlado, use o [Checklist de fechamento do MVP](fechamento-mvp.md) como referencia unica de lacunas de entrega, e deixe o [Checklist executivo de go-live](checklist-go-live.md) apenas para a janela final de liberacao.

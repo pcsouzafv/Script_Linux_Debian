@@ -38,6 +38,8 @@ class MockTicketRecord:
     request_type_name: str | None = None
     category_id: int | None = None
     category_name: str | None = None
+    assignment_group_id: int | None = None
+    assignment_group_name: str | None = None
     linked_item_type: str | None = None
     linked_item_id: int | None = None
     linked_item_name: str | None = None
@@ -59,6 +61,8 @@ class GLPITicketResult:
     request_type_name: str | None = None
     category_id: int | None = None
     category_name: str | None = None
+    assignment_group_id: int | None = None
+    assignment_group_name: str | None = None
     linked_item_type: str | None = None
     linked_item_id: int | None = None
     linked_item_name: str | None = None
@@ -74,6 +78,12 @@ class GLPIResolvedCategory:
 class GLPIResolvedInventoryItem:
     item_type: str
     item_id: int
+    name: str
+
+
+@dataclass(slots=True)
+class GLPIResolvedGroup:
+    group_id: int
     name: str
 
 
@@ -150,16 +160,23 @@ class GLPIClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._category_cache: dict[int, GLPIResolvedCategory | None] = {}
+        self._group_cache: dict[int, GLPIResolvedGroup | None] = {}
 
     @property
     def configured(self) -> bool:
         return bool(self.settings.glpi_base_url and self._has_supported_auth())
 
-    async def create_ticket(self, ticket: TicketOpenRequest) -> GLPITicketResult:
+    async def create_ticket(
+        self,
+        ticket: TicketOpenRequest,
+        *,
+        suggested_queue: str | None = None,
+    ) -> GLPITicketResult:
         source_slug, request_type_id, request_type_name = self._resolve_ticket_source(
             ticket.subject
         )
         external_id = self._generate_external_id(source_slug)
+        assignment_group_name = self._resolve_assignment_group_name(suggested_queue)
 
         if not self.configured:
             ticket_id = self._generate_mock_ticket_id()
@@ -176,6 +193,7 @@ class GLPIClient:
                 request_type_id=request_type_id,
                 request_type_name=request_type_name,
                 category_name=ticket.category,
+                assignment_group_name=assignment_group_name,
                 followups=[],
                 solutions=[],
             )
@@ -187,6 +205,11 @@ class GLPIClient:
             notes.append(
                 f"Metadados analíticos preparados no backend: externalid={external_id}, origem={request_type_name}."
             )
+            if assignment_group_name:
+                notes.append(
+                    "Fila operacional convertida para grupo GLPI em modo mock: "
+                    f"{assignment_group_name}."
+                )
             return GLPITicketResult(
                 ticket_id=ticket_id,
                 status="queued-local",
@@ -196,6 +219,7 @@ class GLPIClient:
                 request_type_id=request_type_id,
                 request_type_name=request_type_name,
                 category_name=ticket.category,
+                assignment_group_name=assignment_group_name,
             )
 
         session_token = await self._open_session()
@@ -204,6 +228,17 @@ class GLPIClient:
             notes: list[str] = []
             resolved_category: GLPIResolvedCategory | None = None
             resolved_inventory_item: GLPIResolvedInventoryItem | None = None
+            resolved_assignment_group: GLPIResolvedGroup | None = None
+
+            if assignment_group_name and suggested_queue:
+                if assignment_group_name.casefold() == suggested_queue.strip().casefold():
+                    notes.append(
+                        f"Fila {suggested_queue} será usada como grupo alvo do GLPI."
+                    )
+                else:
+                    notes.append(
+                        f"Fila {suggested_queue} mapeada para grupo GLPI {assignment_group_name}."
+                    )
 
             if ticket.category:
                 try:
@@ -284,6 +319,31 @@ class GLPIClient:
             )
             notes.append(f"externalid persistido no GLPI: {external_id}.")
 
+            if assignment_group_name:
+                try:
+                    resolved_assignment_group = await self._find_group_by_name(
+                        assignment_group_name,
+                        session_token=session_token,
+                    )
+                    if resolved_assignment_group is None:
+                        notes.append(
+                            f"Grupo {assignment_group_name} não encontrado no GLPI; ticket criado sem Group_Ticket."
+                        )
+                    else:
+                        await self._assign_ticket_to_group(
+                            ticket_id=ticket_id,
+                            group=resolved_assignment_group,
+                            session_token=session_token,
+                        )
+                        notes.append(
+                            "Grupo responsável vinculado no GLPI: "
+                            f"{resolved_assignment_group.name} ({resolved_assignment_group.group_id})."
+                        )
+                except IntegrationError as exc:
+                    notes.append(
+                        f"Ticket criado, mas falhou ao vincular grupo no GLPI: {exc}"
+                    )
+
             if resolved_inventory_item is not None:
                 try:
                     await self._link_ticket_to_item(
@@ -311,6 +371,14 @@ class GLPIClient:
                 request_type_name=request_type_name,
                 category_id=(resolved_category.category_id if resolved_category else None),
                 category_name=(resolved_category.name if resolved_category else ticket.category),
+                assignment_group_id=(
+                    resolved_assignment_group.group_id if resolved_assignment_group else None
+                ),
+                assignment_group_name=(
+                    resolved_assignment_group.name
+                    if resolved_assignment_group is not None
+                    else assignment_group_name
+                ),
                 linked_item_type=(resolved_inventory_item.item_type if resolved_inventory_item else None),
                 linked_item_id=(resolved_inventory_item.item_id if resolved_inventory_item else None),
                 linked_item_name=(resolved_inventory_item.name if resolved_inventory_item else None),
@@ -1375,6 +1443,84 @@ class GLPIClient:
         self._category_cache[category_id] = resolved
         return resolved
 
+    async def _find_group_by_name(
+        self,
+        group_name: str,
+        *,
+        session_token: str,
+    ) -> GLPIResolvedGroup | None:
+        rows = await self._search_named_resource(
+            "Group",
+            group_name,
+            session_token=session_token,
+            forcedisplay=(2, 1),
+            range_="0-19",
+        )
+
+        normalized_group_name = group_name.strip().casefold()
+        exact_matches: list[GLPIResolvedGroup] = []
+        fallback_matches: list[GLPIResolvedGroup] = []
+
+        for row in rows:
+            parsed_group = self._parse_group_row(row)
+            if parsed_group is None:
+                continue
+            resolved_group = await self._get_group_by_id(
+                parsed_group.group_id,
+                session_token=session_token,
+            )
+            if resolved_group is None:
+                resolved_group = parsed_group
+            fallback_matches.append(resolved_group)
+            if resolved_group.name.casefold() == normalized_group_name:
+                exact_matches.append(resolved_group)
+
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if not exact_matches and len(fallback_matches) == 1:
+            return fallback_matches[0]
+        return None
+
+    async def _get_group_by_id(
+        self,
+        group_id: int,
+        *,
+        session_token: str,
+    ) -> GLPIResolvedGroup | None:
+        if group_id in self._group_cache:
+            return self._group_cache[group_id]
+
+        headers = self._session_headers(session_token, with_json_content_type=True)
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.get(
+                    f"{self._base_url()}/Group/{group_id}",
+                    headers=headers,
+                )
+        except httpx.HTTPError as exc:
+            raise IntegrationError(f"Falha ao consultar grupo no GLPI: {exc}") from exc
+
+        if response.status_code == 404:
+            self._group_cache[group_id] = None
+            return None
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise IntegrationError(f"Falha ao consultar grupo no GLPI: {exc}") from exc
+
+        data = response.json()
+        normalized_name = self._normalize_optional_text(
+            data.get("completename") or data.get("name")
+        )
+        if normalized_name is None:
+            self._group_cache[group_id] = None
+            return None
+
+        resolved = GLPIResolvedGroup(group_id=group_id, name=normalized_name)
+        self._group_cache[group_id] = resolved
+        return resolved
+
     async def _find_inventory_item_by_name(
         self,
         asset_name: str,
@@ -1472,6 +1618,61 @@ class GLPIClient:
                 response.raise_for_status()
         except httpx.HTTPError as exc:
             raise IntegrationError(f"Falha ao criar vínculo Item_Ticket no GLPI: {exc}") from exc
+
+    async def _assign_ticket_to_group(
+        self,
+        *,
+        ticket_id: str,
+        group: GLPIResolvedGroup,
+        session_token: str,
+    ) -> None:
+        headers = self._session_headers(session_token, with_json_content_type=True)
+        relation_rows = await self._load_ticket_related_collection(
+            ticket_id=ticket_id,
+            resource_name="Group_Ticket",
+            session_token=session_token,
+        )
+
+        existing_assignment_id: int | None = None
+        for row in relation_rows:
+            if self._normalize_int(row.get("type")) != 2:
+                continue
+            if self._normalize_int(row.get("groups_id")) == group.group_id:
+                return
+            if existing_assignment_id is None:
+                existing_assignment_id = self._normalize_int(row.get("id"))
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                if existing_assignment_id is not None:
+                    response = await client.put(
+                        f"{self._base_url()}/Group_Ticket/{existing_assignment_id}",
+                        headers=headers,
+                        json={
+                            "input": {
+                                "id": existing_assignment_id,
+                                "groups_id": group.group_id,
+                                "type": 2,
+                                "use_notification": 1,
+                            }
+                        },
+                    )
+                else:
+                    response = await client.post(
+                        f"{self._base_url()}/Group_Ticket/",
+                        headers=headers,
+                        json={
+                            "input": {
+                                "tickets_id": self._coerce_live_id(ticket_id),
+                                "groups_id": group.group_id,
+                                "type": 2,
+                                "use_notification": 1,
+                            }
+                        },
+                    )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise IntegrationError(f"Falha ao vincular grupo ao ticket no GLPI: {exc}") from exc
 
     async def _load_ticket_user_actor_ids(
         self,
@@ -1765,6 +1966,15 @@ class GLPIClient:
             name=item_name,
         )
 
+    def _parse_group_row(self, row: dict[str, object]) -> GLPIResolvedGroup | None:
+        group_id = row.get("2") or row.get("id")
+        group_name = self._normalize_optional_text(
+            row.get("completename") or row.get("name") or row.get("1")
+        )
+        if group_id in (None, "") or not group_name:
+            return None
+        return GLPIResolvedGroup(group_id=int(group_id), name=group_name)
+
     def _extract_ticket_user_actor_ids(self, data: object) -> tuple[int | None, int | None]:
         requester_glpi_user_id: int | None = None
         assigned_glpi_user_id: int | None = None
@@ -1801,6 +2011,16 @@ class GLPIClient:
         if parts:
             return " ".join(parts)
         return user.login
+
+    def _resolve_assignment_group_name(self, suggested_queue: str | None) -> str | None:
+        normalized_queue = self._normalize_optional_text(suggested_queue)
+        if normalized_queue is None:
+            return None
+
+        for queue_name, group_name in self.settings.glpi_queue_group_map.items():
+            if queue_name.strip().casefold() == normalized_queue.casefold():
+                return group_name.strip()
+        return normalized_queue
 
     def _normalize_optional_text(self, value: object) -> str | None:
         if value is None:

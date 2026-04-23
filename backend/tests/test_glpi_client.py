@@ -305,6 +305,96 @@ def test_create_ticket_enriches_request_type_category_and_linked_item(monkeypatc
     assert any("Item_Ticket" in note for note in result.notes)
 
 
+def test_create_ticket_assigns_group_from_suggested_queue_mapping(monkeypatch) -> None:
+    captured: dict[str, object] = {
+        "posts": [],
+        "gets": [],
+    }
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def get(self, url: str, headers: dict | None = None, params: list[tuple[str, str]] | None = None):
+            captured["gets"].append({"url": url, "params": params or []})
+            if url.endswith("/search/Group"):
+                return _FakeResponse({"data": [{"2": 5, "1": "Infraestrutura-N1"}]})
+            if url.endswith("/Group/5"):
+                return _FakeResponse(
+                    {
+                        "id": 5,
+                        "name": "Infraestrutura-N1",
+                        "completename": "TI > Infraestrutura > N1",
+                    }
+                )
+            if url.endswith("/Ticket/42/Group_Ticket/"):
+                return _FakeResponse([])
+            raise AssertionError(f"GET inesperado: {url}")
+
+        async def post(self, url: str, headers: dict | None = None, json: dict | None = None):
+            captured["posts"].append({"url": url, "json": json or {}})
+            if url.endswith("/Ticket/"):
+                return _FakeResponse({"id": 42})
+            if url.endswith("/Group_Ticket/"):
+                return _FakeResponse({"id": 99})
+            raise AssertionError(f"POST inesperado: {url}")
+
+    monkeypatch.setattr("app.services.glpi.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(GLPIClient, "_open_session", lambda self: asyncio.sleep(0, result="session-token"))
+    monkeypatch.setattr(GLPIClient, "_close_session", lambda self, session_token: asyncio.sleep(0))
+
+    client = GLPIClient(
+        Settings(
+            _env_file=None,
+            glpi_base_url="http://127.0.0.1:8088/apirest.php",
+            glpi_username="glpi",
+            glpi_password="glpi",
+            glpi_queue_group_map={
+                "Infraestrutura-N1": "TI > Infraestrutura > N1",
+            },
+        )
+    )
+
+    result = asyncio.run(
+        client.create_ticket(
+            TicketOpenRequest(
+                subject="Operacional WhatsApp: VPN sem acesso",
+                description="Equipe perdeu acesso administrativo ao bastion da VPN.",
+                service_name="vpn",
+                priority=TicketPriority.HIGH,
+                requester={
+                    "external_id": "tech-ana-souza",
+                    "display_name": "Ana Souza",
+                    "phone_number": "+5511912345678",
+                    "glpi_user_id": 7,
+                },
+            ),
+            suggested_queue="Infraestrutura-N1",
+        )
+    )
+
+    ticket_payload = captured["posts"][0]["json"]
+    group_payload = captured["posts"][1]["json"]
+
+    assert ticket_payload["input"]["_users_id_requester"] == 7
+    assert group_payload["input"] == {
+        "tickets_id": 42,
+        "groups_id": 5,
+        "type": 2,
+        "use_notification": 1,
+    }
+    assert result.ticket_id == "42"
+    assert result.assignment_group_id == 5
+    assert result.assignment_group_name == "TI > Infraestrutura > N1"
+    assert any("Grupo responsável vinculado" in note for note in result.notes)
+
+
 def test_list_ticket_ids_uses_search_ticket(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

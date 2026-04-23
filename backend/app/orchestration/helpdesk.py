@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from app.schemas.helpdesk import (
@@ -30,7 +31,8 @@ from app.schemas.helpdesk import (
     WhatsAppWebhookProcessingResponse,
 )
 from app.services.automation import AutomationService
-from app.services.exceptions import IntegrationError, ResourceNotFoundError
+from app.services.exceptions import AuthorizationError, IntegrationError, ResourceNotFoundError
+from app.services.glpi_analytics import GLPIAnalyticsSyncService
 from app.services.glpi import GLPIClient
 from app.services.identity import IdentityService
 from app.services.intake import UserIntakeOutcome, UserIntakeService, UserTicketOption
@@ -67,6 +69,16 @@ ALLOWED_OPERATOR_COMMANDS: dict[UserRole, set[str]] = {
     },
 }
 
+OPERATOR_COMMAND_ALIASES: dict[str, str] = {
+    "ajuda": "help",
+    "comecar": "help",
+    "começar": "help",
+    "entrar": "help",
+    "iniciar": "help",
+    "inicio": "help",
+    "start": "help",
+}
+
 OPERATIONAL_ROLES = {
     UserRole.TECHNICIAN,
     UserRole.SUPERVISOR,
@@ -96,6 +108,21 @@ CANCELLATION_REASON_LABELS = {
     "duplicate_request": "Solicitacao duplicada cancelada.",
     "manual_intervention_completed": "Intervencao manual concluida; execucao nao e mais necessaria.",
 }
+WHATSAPP_MESSAGE_DEDUP_TTL = timedelta(minutes=10)
+PROCESSED_WHATSAPP_MESSAGE_IDS: dict[str, datetime] = {}
+
+
+def clear_processed_whatsapp_message_ids() -> None:
+    PROCESSED_WHATSAPP_MESSAGE_IDS.clear()
+
+
+@dataclass(slots=True)
+class TicketMonitoringReconciliationResult:
+    status: str
+    mode: str | None = None
+    event_ids: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    close_problem_requested: bool = False
 
 
 class HelpdeskOrchestrator:
@@ -164,7 +191,10 @@ class HelpdeskOrchestrator:
             service_name=effective_request.service_name,
             limit=5,
         )
-        ticket_result = await self.glpi_client.create_ticket(effective_request)
+        ticket_result = await self.glpi_client.create_ticket(
+            effective_request,
+            suggested_queue=triage.suggested_queue,
+        )
 
         notes = [
             *resolved_requester.notes,
@@ -195,22 +225,37 @@ class HelpdeskOrchestrator:
                 "identity_source": resolved_requester.source,
                 "integration_mode": integration_mode,
                 "correlation_event_count": len(correlation),
+                "correlation_events": [
+                    {
+                        "event_id": event.event_id,
+                        "severity": event.severity,
+                        "summary": event.summary,
+                        "host": event.host,
+                    }
+                    for event in correlation
+                ],
                 "glpi_external_id": ticket_result.external_id,
                 "glpi_request_type_id": ticket_result.request_type_id,
                 "glpi_request_type_name": ticket_result.request_type_name,
                 "glpi_category_id": ticket_result.category_id,
                 "glpi_category_name": ticket_result.category_name,
+                "glpi_assignment_group_id": ticket_result.assignment_group_id,
+                "glpi_assignment_group_name": ticket_result.assignment_group_name,
                 "glpi_linked_item_type": ticket_result.linked_item_type,
                 "glpi_linked_item_id": ticket_result.linked_item_id,
                 "glpi_linked_item_name": ticket_result.linked_item_name,
             },
         )
+        snapshot_notes = await self._sync_ticket_snapshot(ticket_result.ticket_id)
+        notes.extend(snapshot_notes)
 
         return TicketOpenResponse(
             ticket_id=ticket_result.ticket_id,
             status=ticket_result.status,
             routed_to=triage.suggested_queue,
             integration_mode=integration_mode,
+            glpi_assignment_group_id=ticket_result.assignment_group_id,
+            glpi_assignment_group_name=ticket_result.assignment_group_name,
             requester_role=effective_request.requester.role,
             requester_external_id=effective_request.requester.external_id,
             requester_display_name=effective_request.requester.display_name,
@@ -963,8 +1008,28 @@ class HelpdeskOrchestrator:
         interactions: list[WhatsAppInteractionResponse] = []
         modes: set[str] = set()
 
+        now = datetime.now(timezone.utc)
+        self._purge_processed_whatsapp_message_ids(now)
         for message in messages:
-            response = await self.process_whatsapp_message(message)
+            dedup_key = self._whatsapp_message_dedup_key(message)
+            if dedup_key and dedup_key in PROCESSED_WHATSAPP_MESSAGE_IDS:
+                ignored_events.append(
+                    f"Mensagem duplicada ignorada: {message.external_message_id}."
+                )
+                continue
+            if dedup_key:
+                PROCESSED_WHATSAPP_MESSAGE_IDS[dedup_key] = now
+            try:
+                response = await self.process_whatsapp_message(message)
+            except AuthorizationError:
+                ignored_events.append(
+                    "Mensagem ignorada: remetente sem identidade autorizada no GLPI."
+                )
+                continue
+            except Exception:
+                if dedup_key:
+                    PROCESSED_WHATSAPP_MESSAGE_IDS.pop(dedup_key, None)
+                raise
             interactions.append(response)
             modes.add(response.integration_mode)
 
@@ -988,6 +1053,21 @@ class HelpdeskOrchestrator:
         ignored_events: list[str],
     ) -> WhatsAppWebhookProcessingResponse:
         return await self.process_whatsapp_webhook_messages(messages, ignored_events)
+
+    def _whatsapp_message_dedup_key(self, message: NormalizedWhatsAppMessage) -> str | None:
+        if not message.external_message_id:
+            return None
+        return f"{message.sender_phone}:{message.external_message_id}"
+
+    def _purge_processed_whatsapp_message_ids(self, now: datetime) -> None:
+        expired_before = now - WHATSAPP_MESSAGE_DEDUP_TTL
+        expired_keys = [
+            key
+            for key, processed_at in PROCESSED_WHATSAPP_MESSAGE_IDS.items()
+            if processed_at < expired_before
+        ]
+        for key in expired_keys:
+            PROCESSED_WHATSAPP_MESSAGE_IDS.pop(key, None)
 
     async def get_ticket(self, ticket_id: str) -> TicketDetailsResponse:
         ticket = await self.glpi_client.get_ticket(ticket_id)
@@ -1092,7 +1172,7 @@ class HelpdeskOrchestrator:
             )
         )
         available_commands = self._available_command_docs(requester.role)
-        reply_text = self._build_operator_assistant_reply(
+        reply_text, reply_notes = await self._compose_operator_assistant_reply(
             role=requester.role,
             triage=triage,
         )
@@ -1105,8 +1185,59 @@ class HelpdeskOrchestrator:
             notes=[
                 f"Fluxo operacional aplicado para o papel {requester.role.value}.",
                 "Mensagem livre não abriu chamado automaticamente; use /open para registrar um novo chamado.",
+                *reply_notes,
             ],
         )
+
+    async def _compose_operator_assistant_reply(
+        self,
+        *,
+        role: UserRole,
+        triage: TicketTriageResponse,
+    ) -> tuple[str, list[str]]:
+        base_reply = self._build_operator_assistant_reply(role=role, triage=triage)
+        get_status = getattr(self.llm_client, "get_status", None)
+        if get_status is None:
+            return base_reply, []
+
+        status = get_status()
+        if status.status != "configured":
+            return base_reply, []
+
+        next_step = triage.next_steps[0] if triage.next_steps else "Use /help para ver os comandos disponíveis."
+        resolution_hint = triage.resolution_hints[0] if triage.resolution_hints else "n/a"
+        similar_incident = triage.similar_incidents[0] if triage.similar_incidents else "n/a"
+        prompt = (
+            "Reescreva a mensagem base abaixo para WhatsApp com tom humano, cordial e profissional. "
+            "Preserve exatamente comandos com '/', filas, status e fatos tecnicos. "
+            "Nao invente informacoes, nao prometa execucao automatica e nao remova alertas de seguranca. "
+            "Responda com no maximo 6 linhas.\n\n"
+            f"Papel operacional: {role.value}\n"
+            f"Resumo da triagem: {triage.summary}\n"
+            f"Proximo passo principal: {next_step}\n"
+            f"Sugestao de resolucao: {resolution_hint}\n"
+            f"Caso semelhante: {similar_incident}\n"
+            "Mensagem base:\n"
+            f"{base_reply}"
+        )
+
+        try:
+            result = await self.llm_client.generate_text(
+                user_prompt=prompt,
+                system_prompt=(
+                    "Voce melhora a redacao de um assistente virtual de helpdesk. "
+                    "Seja natural, claro e confiavel sem perder objetividade."
+                ),
+                max_tokens=220,
+                temperature=0.3,
+            )
+        except IntegrationError:
+            return base_reply, []
+
+        refined_reply = result.content.strip()
+        if not refined_reply:
+            return base_reply, []
+        return refined_reply, [f"Resposta operacional refinada pela IA ({result.provider})."]
 
     async def _run_operator_command(
         self,
@@ -1114,9 +1245,18 @@ class HelpdeskOrchestrator:
         requester: RequesterIdentity,
     ) -> TechnicianCommandResponse:
         text = message.text.strip()
-        parts = text.split(maxsplit=1)
-        command_name = parts[0].lstrip("/").lower()
-        command_args = parts[1] if len(parts) > 1 else ""
+        command_payload = text.lstrip("/").strip()
+        if command_payload:
+            parts = command_payload.split(maxsplit=1)
+            requested_command_name = parts[0].lower()
+            command_name = OPERATOR_COMMAND_ALIASES.get(
+                requested_command_name,
+                requested_command_name,
+            )
+            command_args = parts[1] if len(parts) > 1 else ""
+        else:
+            command_name = "help"
+            command_args = ""
 
         if not self._is_command_allowed(requester.role, command_name):
             return TechnicianCommandResponse(
@@ -1437,6 +1577,8 @@ class HelpdeskOrchestrator:
             resolution_advice = draft_resolution_advice
             solution_notes: list[str] = []
             notification_notes: list[str] = []
+            monitoring_notes: list[str] = []
+            monitoring_result = TicketMonitoringReconciliationResult(status="skipped")
 
             if ticket.status == "solved" and draft_resolution_advice is not None:
                 try:
@@ -1497,6 +1639,17 @@ class HelpdeskOrchestrator:
                             f"Status atualizado, mas falhou a notificacao do solicitante: {exc}"
                         )
 
+            if ticket.status in {"solved", "closed"}:
+                monitoring_result = await self._reconcile_ticket_monitoring(
+                    ticket_id=ticket.ticket_id,
+                    ticket_status=ticket.status,
+                    actor=requester,
+                    source_channel="whatsapp",
+                )
+                monitoring_notes.extend(monitoring_result.notes)
+                if monitoring_result.mode:
+                    operation_mode = self._merge_modes(operation_mode, monitoring_result.mode)
+
             await self._audit_event(
                 event_type="ticket_status_changed",
                 actor_external_id=requester.external_id,
@@ -1509,12 +1662,21 @@ class HelpdeskOrchestrator:
                     "new_status": ticket.status,
                     "solution_recorded": solution_recorded,
                     "requester_notified": requester_notified,
+                    "zabbix_reconciliation_status": monitoring_result.status,
+                    "zabbix_reconciled_event_ids": monitoring_result.event_ids,
+                    "zabbix_close_problem_requested": monitoring_result.close_problem_requested,
                 },
             )
 
             reply_text = f"Status do ticket {ticket.ticket_id} atualizado para {ticket.status}."
             if requester_notified:
                 reply_text = f"{reply_text} Atualizacao enviada ao solicitante."
+            if monitoring_result.status == "closed":
+                reply_text = f"{reply_text} Problema correlacionado reconciliado no Zabbix."
+            elif monitoring_result.status == "acknowledged":
+                reply_text = f"{reply_text} Alerta correlacionado anotado no Zabbix para acompanhamento."
+            elif monitoring_result.status == "noop":
+                reply_text = f"{reply_text} Nao encontrei problema ativo correlacionado no Zabbix para atualizar agora."
             if resolution_advice is not None:
                 reply_text = f"{reply_text} Sugestao: {resolution_advice.summary}"
                 if resolution_advice.suggested_actions:
@@ -1528,7 +1690,7 @@ class HelpdeskOrchestrator:
                 reply_text=reply_text,
                 ticket=ticket,
                 resolution_advice=resolution_advice,
-                notes=[*result.notes, *solution_notes, *notification_notes, *resolution_notes],
+                notes=[*result.notes, *solution_notes, *notification_notes, *monitoring_notes, *resolution_notes],
             )
 
         if command_name == "assign":
@@ -1644,6 +1806,150 @@ class HelpdeskOrchestrator:
         except IntegrationError as exc:
             return [], "degraded", [f"Falha na correlação com Zabbix: {exc}"]
 
+    async def _sync_ticket_snapshot(self, ticket_id: str) -> list[str]:
+        sync_service = GLPIAnalyticsSyncService(
+            glpi_client=self.glpi_client,
+            operational_store=self.operational_store,
+            analytics_store=self.analytics_store,
+        )
+        summary = await sync_service.sync_ticket_snapshots(ticket_ids=[ticket_id])
+        if not summary.results:
+            return []
+        return list(dict.fromkeys(note for note in summary.results[0].notes if note))
+
+    async def _reconcile_ticket_monitoring(
+        self,
+        *,
+        ticket_id: str,
+        ticket_status: str,
+        actor: RequesterIdentity,
+        source_channel: str,
+    ) -> TicketMonitoringReconciliationResult:
+        normalized_status = str(ticket_status or "").strip().lower()
+        close_problem_requested = normalized_status == "closed"
+        if normalized_status not in {"solved", "closed"}:
+            return TicketMonitoringReconciliationResult(status="skipped")
+
+        notes = await self._sync_ticket_snapshot(ticket_id)
+        snapshot = await self.analytics_store.get_snapshot(ticket_id)
+        if snapshot is None:
+            notes.append(
+                "Snapshot analitico indisponivel; nao foi possivel reconciliar alertas correlacionados no Zabbix."
+            )
+            return TicketMonitoringReconciliationResult(
+                status="snapshot-unavailable",
+                notes=list(dict.fromkeys(note for note in notes if note)),
+                close_problem_requested=close_problem_requested,
+            )
+
+        correlation_event_ids = self._extract_snapshot_correlation_event_ids(snapshot.attributes_json)
+        try:
+            zabbix_result = await self.zabbix_client.reconcile_problem_events(
+                event_ids=correlation_event_ids or None,
+                asset_name=snapshot.asset_name,
+                service_name=snapshot.service_name,
+                message=self._build_zabbix_reconciliation_message(
+                    ticket_id=ticket_id,
+                    ticket_status=normalized_status,
+                    actor=actor,
+                ),
+                close_problem=close_problem_requested,
+            )
+        except IntegrationError as exc:
+            notes.append(f"Falha ao reconciliar problema no Zabbix: {exc}")
+            deduplicated_notes = list(dict.fromkeys(note for note in notes if note))
+            await self._audit_event(
+                event_type="zabbix_problem_reconciliation_failed",
+                actor_external_id=actor.external_id,
+                actor_role=actor.role.value,
+                ticket_id=ticket_id,
+                source_channel=source_channel,
+                status=normalized_status,
+                payload_json={
+                    "ticket_status": normalized_status,
+                    "close_problem_requested": close_problem_requested,
+                    "snapshot_available": True,
+                    "asset_name": snapshot.asset_name,
+                    "service_name": snapshot.service_name,
+                    "correlation_event_ids": correlation_event_ids,
+                },
+            )
+            return TicketMonitoringReconciliationResult(
+                status="error",
+                notes=deduplicated_notes,
+                close_problem_requested=close_problem_requested,
+            )
+
+        notes.extend(zabbix_result.notes)
+        deduplicated_notes = list(dict.fromkeys(note for note in notes if note))
+        await self._audit_event(
+            event_type="zabbix_problem_reconciled",
+            actor_external_id=actor.external_id,
+            actor_role=actor.role.value,
+            ticket_id=ticket_id,
+            source_channel=source_channel,
+            status=normalized_status,
+            payload_json={
+                "ticket_status": normalized_status,
+                "zabbix_status": zabbix_result.status,
+                "close_problem_requested": close_problem_requested,
+                "snapshot_available": True,
+                "asset_name": snapshot.asset_name,
+                "service_name": snapshot.service_name,
+                "correlation_event_ids": correlation_event_ids,
+                "reconciled_event_ids": zabbix_result.event_ids,
+            },
+        )
+        return TicketMonitoringReconciliationResult(
+            status=zabbix_result.status,
+            mode=zabbix_result.mode,
+            event_ids=zabbix_result.event_ids,
+            notes=deduplicated_notes,
+            close_problem_requested=close_problem_requested,
+        )
+
+    def _extract_snapshot_correlation_event_ids(self, attributes_json: dict[str, object]) -> list[str]:
+        if not isinstance(attributes_json, dict):
+            return []
+
+        audit_payload = attributes_json.get("audit_payload")
+        if not isinstance(audit_payload, dict):
+            audit_payload = {}
+
+        candidate_lists = [
+            audit_payload.get("correlation_events"),
+            attributes_json.get("correlation_events"),
+        ]
+        event_ids: list[str] = []
+        for candidate in candidate_lists:
+            if not isinstance(candidate, list):
+                continue
+            for item in candidate:
+                if not isinstance(item, dict):
+                    continue
+                event_id = str(item.get("event_id") or item.get("eventid") or "").strip()
+                if event_id and event_id not in event_ids:
+                    event_ids.append(event_id)
+        return event_ids
+
+    def _build_zabbix_reconciliation_message(
+        self,
+        *,
+        ticket_id: str,
+        ticket_status: str,
+        actor: RequesterIdentity,
+    ) -> str:
+        actor_name = actor.display_name or actor.external_id or "helpdesk"
+        if ticket_status == "closed":
+            return (
+                f"Ticket {ticket_id} encerrado no helpdesk por {actor_name}. "
+                "Registrar reconciliacao operacional do problema correlacionado."
+            )
+        return (
+            f"Ticket {ticket_id} marcado como resolvido no helpdesk por {actor_name}. "
+            "Registrar acknowledge e validar se o problema monitorado ja pode ser encerrado."
+        )
+
     def _build_ticket_request_from_message(
         self,
         message: NormalizedWhatsAppMessage,
@@ -1702,15 +2008,21 @@ class HelpdeskOrchestrator:
         return TicketOpenRequest(**payload)
 
     def _build_confirmation_message(self, response: TicketOpenResponse) -> str:
-        return (
-            f"Seu chamado foi registrado com o número {response.ticket_id}. "
-            f"Fila responsável: {response.routed_to}. Status inicial: {response.status}."
+        return "\n".join(
+            [
+                f"Pronto, seu chamado foi registrado com o número {response.ticket_id}.",
+                f"Fila responsável: {response.routed_to}. Status inicial: {response.status}.",
+                "Se quiser complementar alguma informação, pode responder por aqui.",
+            ]
         )
 
     def _build_operator_open_confirmation_message(self, response: TicketOpenResponse) -> str:
-        return (
-            f"Chamado operacional registrado com o número {response.ticket_id}. "
-            f"Fila sugerida: {response.routed_to}. Status inicial: {response.status}."
+        return "\n".join(
+            [
+                f"Chamado operacional registrado com o número {response.ticket_id}.",
+                f"Fila sugerida: {response.routed_to}. Status inicial: {response.status}.",
+                "Se precisar seguir com o atendimento, use /ticket, /comment ou /status.",
+            ]
         )
 
     def _build_requester_comment_message(
@@ -1721,8 +2033,10 @@ class HelpdeskOrchestrator:
     ) -> str:
         operator_name = operator.display_name or operator.external_id or "atendente"
         return (
-            f"Atualização do chamado {ticket.ticket_id}: {ticket.subject}\n"
-            f"Mensagem do atendente {operator_name}: {comment_text}\n"
+            f"Oi! Aqui é o suporte sobre o chamado {ticket.ticket_id}.\n"
+            f"Assunto: {ticket.subject}\n"
+            f"{operator_name} deixou esta atualização:\n"
+            f"{comment_text}\n"
             "Se precisar complementar, responda esta conversa informando o número do chamado."
         )
 
@@ -1734,8 +2048,9 @@ class HelpdeskOrchestrator:
     ) -> str:
         operator_name = operator.display_name or operator.external_id or "atendente"
         lines = [
-            f"Atualizacao do chamado {ticket.ticket_id}: {ticket.subject}",
-            f"O atendente {operator_name} atualizou o status para {ticket.status}.",
+            f"Oi! Aqui é o suporte sobre o chamado {ticket.ticket_id}.",
+            f"Assunto: {ticket.subject}",
+            f"{operator_name} atualizou o status para {ticket.status}.",
         ]
         if resolution_advice is not None:
             lines.append(f"Resumo da resolucao: {resolution_advice.summary}")
@@ -1772,16 +2087,17 @@ class HelpdeskOrchestrator:
     ) -> str:
         next_step = triage.next_steps[0] if triage.next_steps else "Use /help para ver os comandos disponíveis."
         parts = [
-            f"Perfil operacional detectado: {role.value}. Não abri chamado automaticamente.",
-            f"Triagem: {triage.summary}",
-            f"Próximo passo: {next_step}",
+            f"Entendi. Perfil operacional detectado: {self._role_display_name(role)}. Não abri chamado automaticamente.",
+            f"Leitura inicial: {triage.summary}",
+            f"Melhor próximo passo agora: {next_step}",
         ]
         if triage.resolution_hints:
-            parts.append(f"Sugestao de resolucao: {triage.resolution_hints[0]}")
+            parts.append(f"Tentativa segura sugerida: {triage.resolution_hints[0]}")
         if triage.similar_incidents:
-            parts.append(f"Caso semelhante: {triage.similar_incidents[0]}")
+            parts.append(f"Referencia parecida: {triage.similar_incidents[0]}")
         parts.append("Se quiser registrar um novo chamado, use /open <descrição>.")
-        return " ".join(parts)
+        parts.append("Se preferir, envie /help para ver os comandos disponíveis.")
+        return "\n".join(parts)
 
     def _to_ticket_resolution_entry_response(self, entry: object) -> TicketResolutionEntryResponse:
         return TicketResolutionEntryResponse(
@@ -1957,21 +2273,13 @@ class HelpdeskOrchestrator:
         return f"{prefix}: {subject_preview}"
 
     def _build_help_reply(self, role: UserRole) -> str:
-        command_docs = {
-            "assign": "/assign <id> <identificador>",
-            "comment": "/comment <id> <texto>",
-            "correlate": "/correlate <alvo>",
-            "help": "/help",
-            "me": "/me",
-            "open": "/open <descrição>",
-            "status": "/status <id> <status>",
-            "ticket": "/ticket <id>",
-        }
-        commands_text = ", ".join(self._available_command_docs(role))
-        return (
-            f"Comandos disponíveis para {role.value}: {commands_text}. "
-            "Mensagens sem '/' entram no assistente operacional; use /open para abrir chamado explicitamente."
-        )
+        lines = [
+            f"Modo operacional ativo para {self._role_display_name(role)}.",
+            "Posso te ajudar com estes comandos:",
+            *(f"- {command}" for command in self._available_command_docs(role)),
+            "Mensagens sem '/' entram no assistente operacional; use /open para abrir chamado explicitamente.",
+        ]
+        return "\n".join(lines)
 
     async def _start_user_ticket_finalization(
         self,
@@ -2046,8 +2354,8 @@ class HelpdeskOrchestrator:
                 ),
             ]
             reply_text = (
-                f"O chamado {current_ticket.ticket_id} não pode ser finalizado agora porque está em "
-                f"status {current_ticket.status}. Só é possível finalizar chamados que ainda estejam abertos."
+                f"Conferi o chamado {current_ticket.ticket_id}, mas ele nao pode ser finalizado agora "
+                f"porque esta com status {current_ticket.status}. So consigo finalizar chamados que ainda estejam abertos."
             )
             await self._audit_event(
                 event_type="ticket_finalization_rejected",
@@ -2090,12 +2398,27 @@ class HelpdeskOrchestrator:
                 f"Chamado finalizado, mas não foi possível registrar o comentário de auditoria: {exc}"
             )
 
+        monitoring_result = await self._reconcile_ticket_monitoring(
+            ticket_id=ticket.ticket_id,
+            ticket_status=ticket.status,
+            actor=requester,
+            source_channel="whatsapp",
+        )
+        notes.extend(monitoring_result.notes)
+
         reply_text = (
-            f"Chamado {ticket.ticket_id} finalizado com sucesso. "
+            f"Pronto, finalizei o chamado {ticket.ticket_id} com sucesso. "
             f"Status atual: {ticket.status}."
         )
         if selected_option:
-            reply_text += f" Seleção confirmada: {selected_option}."
+            reply_text += f" Selecao confirmada: {selected_option}."
+        if monitoring_result.status == "closed":
+            reply_text += " Problema correlacionado reconciliado no Zabbix."
+        elif monitoring_result.status == "acknowledged":
+            reply_text += " Alerta correlacionado anotado no Zabbix para acompanhamento."
+        elif monitoring_result.status == "noop":
+            reply_text += " Nao encontrei problema ativo correlacionado no Zabbix para atualizar agora."
+        reply_text += " Se precisar de novo, e so me chamar por aqui."
 
         await self._audit_event(
             event_type="ticket_finalized_by_user",
@@ -2107,6 +2430,9 @@ class HelpdeskOrchestrator:
             payload_json={
                 "selected_option": selected_option,
                 "followup_recorded": followup_recorded,
+                "zabbix_reconciliation_status": monitoring_result.status,
+                "zabbix_reconciled_event_ids": monitoring_result.event_ids,
+                "zabbix_close_problem_requested": monitoring_result.close_problem_requested,
             },
         )
 
@@ -2141,6 +2467,15 @@ class HelpdeskOrchestrator:
         if role is UserRole.ADMIN:
             return "admin_operations"
         return "requester_self_service"
+
+    def _role_display_name(self, role: UserRole) -> str:
+        labels = {
+            UserRole.USER: "usuario",
+            UserRole.TECHNICIAN: "tecnico",
+            UserRole.SUPERVISOR: "supervisor",
+            UserRole.ADMIN: "administrador",
+        }
+        return labels.get(role, role.value)
 
     def _to_ticket_details_response(self, ticket: object) -> TicketDetailsResponse:
         return TicketDetailsResponse(

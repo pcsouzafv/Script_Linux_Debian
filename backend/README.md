@@ -54,7 +54,7 @@ pip install -e .[dev]
 ./run_dev.sh
 ```
 
-O arquivo [backend/.env](/home/ricardo/Script_Linux_Debian/backend/.env) já foi criado com todas as chaves de credenciais esperadas. Enquanto os valores continuarem como placeholder, o backend trata essas integrações como não configuradas e permanece em modo mock. Quando quiser ativar chamadas externas, voce pode usar tanto tokens quanto usuario e senha, dependendo da integracao.
+O arquivo [backend/.env](.env) já foi criado com todas as chaves de credenciais esperadas. Enquanto os valores continuarem como placeholder, o backend trata essas integrações como não configuradas e permanece em modo mock. Quando quiser ativar chamadas externas, voce pode usar tanto tokens quanto usuario e senha, dependendo da integracao.
 
 As rotas internas sob `/api/v1/helpdesk/*` e o endpoint bruto `/api/v1/webhooks/whatsapp/messages` exigem um token de acesso enviado em `X-Helpdesk-API-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_API_ACCESS_TOKEN` antes de consumir ou publicar essas rotas.
 
@@ -98,6 +98,14 @@ No laboratorio local, o repositório ja vem preparado para usar:
 - `HELPDESK_ZABBIX_USERNAME=Admin`
 - `HELPDESK_ZABBIX_PASSWORD=zabbix`
 - `HELPDESK_IDENTITY_STORE_PATH=data/identities.lab.json`
+
+Para que a fila logica sugerida pela triagem vire um grupo real do GLPI, configure `HELPDESK_GLPI_QUEUE_GROUP_MAP`. O backend aceita JSON ou pares `fila=grupo` e usa o `Group_Ticket` com `type=2` para gravar o grupo responsavel no chamado. Exemplo:
+
+```env
+HELPDESK_GLPI_QUEUE_GROUP_MAP={"ServiceDesk-N1":"TI > Service Desk > N1","ServiceDesk-Acessos":"TI > Service Desk > Acessos","Infraestrutura-N1":"TI > Infraestrutura > N1","NOC-Critico":"TI > NOC > Critico"}
+```
+
+Se o nome da fila ja for exatamente igual ao nome do grupo no GLPI, o backend tenta usar esse mesmo nome como fallback mesmo sem mapa explicito. Para hierarquias com `completename`, o recomendado continua sendo preencher o mapa acima.
 
 Persistencia operacional ja suportada no backend:
 
@@ -399,6 +407,7 @@ Neste momento, a fonte principal de identidade do backend e o proprio GLPI.
 - `HELPDESK_IDENTITY_PROVIDER=glpi` ativa a validacao pelo GLPI.
 - O numero do usuario deve existir no cadastro do GLPI, em `phone`, `phone2` ou `mobile`.
 - Se o numero nao existir no GLPI, o fluxo do WhatsApp rejeita a abertura do chamado.
+- Para producao, mantenha `HELPDESK_IDENTITY_PROVIDER=glpi`; `mock-file` deve ficar restrito a laboratorio, testes e demonstracoes controladas.
 - O papel operacional passa a ser resolvido por um mapeamento configuravel de perfis do GLPI.
 - `HELPDESK_WHATSAPP_PUBLIC_NUMBER` representa o numero publico do bot/helpdesk para os usuarios. Ele nao substitui `HELPDESK_WHATSAPP_PHONE_NUMBER_ID`, que continua sendo o identificador exigido pela Meta para envio de mensagens.
 - `HELPDESK_WHATSAPP_DELIVERY_PROVIDER` escolhe o canal de saída: `auto`, `meta`, `evolution` ou `mock`.
@@ -427,9 +436,9 @@ Os numeros operacionais informados neste ambiente ficaram assim:
 - supervisor: `+5521972008679`
 - numero publico do helpdesk/bot: `+553299384534`
 
-O arquivo local de identidades em [backend/data/identities.json](/home/ricardo/Script_Linux_Debian/backend/data/identities.json) continua disponivel apenas para modo mock e testes, controlado por `HELPDESK_IDENTITY_PROVIDER=mock-file` e `HELPDESK_IDENTITY_STORE_PATH`.
+O arquivo local de identidades em [backend/data/identities.json](data/identities.json) continua disponivel apenas para modo mock e testes, controlado por `HELPDESK_IDENTITY_PROVIDER=mock-file` e `HELPDESK_IDENTITY_STORE_PATH`. Ele nao deve ser a fonte autoritativa de identidade em producao.
 
-Para o laboratorio isolado, [backend/data/identities.lab.json](/home/ricardo/Script_Linux_Debian/backend/data/identities.lab.json) continua sendo gerado como apoio para testes, enquanto o seed do laboratorio grava os telefones diretamente no GLPI para usuarios como:
+Para o laboratorio isolado, [backend/data/identities.lab.json](data/identities.lab.json) continua sendo gerado como apoio para testes, enquanto o seed do laboratorio grava os telefones diretamente no GLPI para usuarios como:
 
 - `Maria Santos`
 - `Carlos Lima`
@@ -495,7 +504,7 @@ Para verificar a porta escolhida sem subir a API:
 Com `GLPI` e `Zabbix` ja de pe em `infra/helpdesk-lab`, rode:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/infra/helpdesk-lab
+cd infra/helpdesk-lab
 ./scripts/bootstrap-integrations.sh
 ./scripts/seed-glpi.sh
 ./scripts/seed-zabbix.sh
@@ -518,7 +527,7 @@ Isso faz cinco coisas:
 Depois disso, reinicie o backend:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/backend
+cd backend
 ./run_dev.sh
 ```
 
@@ -527,7 +536,7 @@ cd /home/ricardo/Script_Linux_Debian/backend
 Para enriquecer tickets historicos que foram abertos antes da persistencia de `externalid`, `requesttypes_id`, `itilcategories_id` e vinculo com inventario, rode primeiro em `dry-run`:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/backend
+cd backend
 ./run_glpi_backfill.sh --limit 25
 ```
 

@@ -171,6 +171,51 @@ services:
     networks:
       - helpdesk_lab
 
+  grafana:
+    profiles:
+      - zabbix
+      - full
+      - all
+    image: grafana/grafana-enterprise:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_SERVER_ROOT_URL: http://127.0.0.1:${GRAFANA_HOST_PORT}
+      GF_USERS_DEFAULT_THEME: light
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/helpdesk-lab-zabbix-overview.json
+      GF_PLUGINS_PREINSTALL_SYNC: alexanderzobnin-zabbix-app
+      GRAFANA_ZABBIX_API_URL: http://zabbix-web:8080/api_jsonrpc.php
+      GRAFANA_ZABBIX_API_USERNAME: ${GRAFANA_ZABBIX_API_USERNAME}
+      GRAFANA_ZABBIX_API_PASSWORD: ${GRAFANA_ZABBIX_API_PASSWORD}
+      GRAFANA_ZABBIX_DB_NAME: ${ZABBIX_DB_NAME}
+      GRAFANA_ZABBIX_DB_USER: ${GRAFANA_ZABBIX_DB_USER}
+      GRAFANA_ZABBIX_DB_PASSWORD: ${GRAFANA_ZABBIX_DB_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+      zabbix-web:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:3000/api/health | grep -q ok
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    ports:
+      - 127.0.0.1:${GRAFANA_HOST_PORT}:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - helpdesk_lab
+
 networks:
   helpdesk_lab:
     name: helpdesk_lab
@@ -180,6 +225,8 @@ volumes:
     name: helpdesk_lab_db_data
   glpi_data:
     name: helpdesk_lab_glpi_data
+  grafana_data:
+    name: helpdesk_lab_grafana_data
   postgres_data:
     name: helpdesk_lab_postgres_data
   redis_data:

@@ -163,6 +163,8 @@ class TicketOpenResponse(BaseModel):
     status: str
     routed_to: str
     integration_mode: str
+    glpi_assignment_group_id: int | None = None
+    glpi_assignment_group_name: str | None = None
     requester_role: UserRole
     requester_external_id: str | None = None
     requester_display_name: str | None = None

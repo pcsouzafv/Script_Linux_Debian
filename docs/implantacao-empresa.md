@@ -12,8 +12,8 @@ Este guia descreve como implantar a solucao deste repositorio em um ambiente cor
 
 Documentos complementares:
 
-- ambiente com `GLPI` e `Zabbix` ja existentes: [docs/implantacao-ambiente-existente.md](/home/ricardo/Script_Linux_Debian/docs/implantacao-ambiente-existente.md)
-- checklist executivo de liberacao: [docs/checklist-go-live.md](/home/ricardo/Script_Linux_Debian/docs/checklist-go-live.md)
+- ambiente com `GLPI` e `Zabbix` ja existentes: [implantacao-ambiente-existente.md](implantacao-ambiente-existente.md)
+- checklist executivo de liberacao: [checklist-go-live.md](checklist-go-live.md)
 
 ## Quando usar este guia
 
@@ -39,7 +39,7 @@ Para o MVP, a topologia minima recomendada e esta:
 - `Servico externo`: Evolution API ja existente ou Meta WhatsApp Cloud API.
 - `Host opcional`: Ollama, se a empresa quiser IA local separada do backend.
 
-O script [install_debian12_full_stack.sh](/home/ricardo/Script_Linux_Debian/install_debian12_full_stack.sh) instala `GLPI` e `Zabbix` no mesmo host. Ele deve ser usado apenas em host dedicado Debian 12, com as portas obrigatorias livres.
+O script [install_debian12_full_stack.sh](../install_debian12_full_stack.sh) instala `GLPI` e `Zabbix` no mesmo host. Ele deve ser usado apenas em host dedicado Debian 12, com as portas obrigatorias livres.
 
 ## Passo 1: Definir escopo, responsaveis e janelas
 
@@ -66,7 +66,7 @@ Antes de tocar producao, valide o fluxo no laboratorio isolado do proprio projet
 Suba o laboratorio:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/infra/helpdesk-lab
+cd infra/helpdesk-lab
 cp .env.example .env
 ./scripts/prepare.sh
 ./scripts/preflight.sh
@@ -78,7 +78,7 @@ cp .env.example .env
 Depois suba o backend:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/backend
+cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
@@ -174,7 +174,10 @@ HELPDESK_IDENTITY_GLPI_USER_PROFILES=Self-Service
 HELPDESK_IDENTITY_GLPI_TECHNICIAN_PROFILES=Technician
 HELPDESK_IDENTITY_GLPI_SUPERVISOR_PROFILES=Supervisor
 HELPDESK_IDENTITY_GLPI_ADMIN_PROFILES=Super-Admin,Admin,Administrator
+HELPDESK_GLPI_QUEUE_GROUP_MAP={"ServiceDesk-N1":"TI > Service Desk > N1","ServiceDesk-Acessos":"TI > Service Desk > Acessos","Infraestrutura-N1":"TI > Infraestrutura > N1","NOC-Critico":"TI > NOC > Critico"}
 ```
+
+Use `HELPDESK_GLPI_QUEUE_GROUP_MAP` para transformar a fila logica sugerida pela triagem no grupo real do GLPI. Isso e especialmente importante quando os grupos estiverem em hierarquia, por exemplo `TI > Infraestrutura > N1`. O backend passa a abrir o ticket e gravar o grupo responsavel via `Group_Ticket` com papel de atribuicao.
 
 Criterio de saida deste passo:
 
@@ -234,6 +237,7 @@ HELPDESK_IDENTITY_PROVIDER=glpi
 HELPDESK_GLPI_BASE_URL=https://glpi.empresa.local/apirest.php
 HELPDESK_GLPI_APP_TOKEN=
 HELPDESK_GLPI_USER_TOKEN=
+HELPDESK_GLPI_QUEUE_GROUP_MAP={"ServiceDesk-N1":"TI > Service Desk > N1","ServiceDesk-Acessos":"TI > Service Desk > Acessos","Infraestrutura-N1":"TI > Infraestrutura > N1","NOC-Critico":"TI > NOC > Critico"}
 
 HELPDESK_ZABBIX_BASE_URL=https://zabbix.empresa.local/api_jsonrpc.php
 HELPDESK_ZABBIX_API_TOKEN=
@@ -333,7 +337,7 @@ Escolha um destes caminhos.
 Use este caminho se a empresa ja opera uma `Evolution API` interna.
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/infra/evolution
+cd infra/evolution
 cp .env.example .env
 ./create_instance.sh
 ./configure_webhook.sh https://bot.empresa.local/api/v1/webhooks/whatsapp/evolution

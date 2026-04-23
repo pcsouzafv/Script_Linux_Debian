@@ -4,9 +4,10 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings, get_settings
-from app.core.dependencies import get_helpdesk_orchestrator
+from app.core.dependencies import get_glpi_client, get_helpdesk_orchestrator
 from app.main import app
 from app.schemas.helpdesk import WhatsAppWebhookProcessingResponse
+from app.services.exceptions import ResourceNotFoundError
 from app.services.whatsapp import WhatsAppClient
 
 
@@ -107,6 +108,60 @@ def test_normalize_evolution_webhook_payload_extracts_incoming_text() -> None:
     assert messages[0].external_message_id == "ABCD1234"
 
 
+def test_normalize_evolution_webhook_payload_maps_configured_lid_to_glpi_phone() -> None:
+    settings = Settings(
+        _env_file=None,
+        evolution_lid_phone_map={"220095666237694@lid": "+5521972008679"},
+    )
+    client = WhatsAppClient(settings)
+    payload = {
+        "event": "MESSAGES_UPSERT",
+        "data": {
+            "key": {
+                "remoteJid": "220095666237694@lid",
+                "fromMe": False,
+                "id": "EVO-LID-123",
+            },
+            "pushName": "Ricardo Santana",
+            "message": {"conversation": "/me"},
+            "messageType": "conversation",
+        },
+    }
+
+    messages, ignored_events = client.normalize_evolution_webhook_payload(payload)
+
+    assert ignored_events == []
+    assert len(messages) == 1
+    assert messages[0].sender_phone == "+5521972008679"
+    assert messages[0].sender_name == "Ricardo Santana"
+    assert messages[0].text == "/me"
+    assert messages[0].external_message_id == "EVO-LID-123"
+
+
+def test_normalize_evolution_webhook_payload_ignores_unmapped_lid() -> None:
+    client = WhatsAppClient(Settings(_env_file=None))
+    payload = {
+        "event": "MESSAGES_UPSERT",
+        "data": {
+            "key": {
+                "remoteJid": "220095666237694@lid",
+                "fromMe": False,
+                "id": "EVO-LID-UNKNOWN",
+            },
+            "pushName": "Ricardo Santana",
+            "message": {"conversation": "/me"},
+            "messageType": "conversation",
+        },
+    }
+
+    messages, ignored_events = client.normalize_evolution_webhook_payload(payload)
+
+    assert messages == []
+    assert ignored_events == [
+        "Mensagem ignorada: JID 220095666237694@lid não pôde ser convertido em número."
+    ]
+
+
 def test_receive_evolution_webhook_processes_normalized_message() -> None:
     test_client = TestClient(app)
 
@@ -182,3 +237,94 @@ def test_receive_evolution_webhook_rejects_invalid_secret() -> None:
 
     assert response.status_code == 403
     assert "evolution" in response.json()["detail"].lower()
+
+
+def test_receive_evolution_webhook_accepts_secret_query_fallback() -> None:
+    test_client = TestClient(app)
+
+    class FakeOrchestrator:
+        async def process_whatsapp_webhook_messages(self, messages, ignored_events):
+            return WhatsAppWebhookProcessingResponse(
+                processed_messages=len(messages),
+                interactions=[],
+                ignored_events=ignored_events,
+                integration_mode="mock",
+            )
+
+    app.dependency_overrides[get_helpdesk_orchestrator] = lambda: FakeOrchestrator()
+
+    settings = get_settings()
+    original_secret = settings.evolution_webhook_secret
+    settings.evolution_webhook_secret = "segredo-evolution"
+
+    try:
+        response = test_client.post(
+            "/api/v1/webhooks/whatsapp/evolution?secret=segredo-evolution",
+            json={
+                "event": "MESSAGES_UPSERT",
+                "data": {
+                    "key": {
+                        "remoteJid": "5521972008679@s.whatsapp.net",
+                        "fromMe": False,
+                        "id": "EVO-QUERY-555",
+                    },
+                    "pushName": "Paula Almeida",
+                    "message": {"conversation": "/me"},
+                    "messageType": "conversation",
+                },
+            },
+        )
+    finally:
+        settings.evolution_webhook_secret = original_secret
+        app.dependency_overrides.pop(get_helpdesk_orchestrator, None)
+
+    assert response.status_code == 202
+    assert response.json()["processed_messages"] == 1
+
+
+def test_receive_evolution_webhook_acks_unknown_glpi_identity_without_reply() -> None:
+    test_client = TestClient(app)
+
+    class FakeGLPIClientRejectUnknownPhone:
+        configured = True
+
+        async def find_user_by_phone(self, phone_number: str):
+            raise ResourceNotFoundError(
+                f"Nenhum usuario GLPI ativo encontrado para numero {phone_number}."
+            )
+
+    settings = get_settings()
+    original_secret = settings.evolution_webhook_secret
+    original_identity_provider = settings.identity_provider
+    settings.evolution_webhook_secret = "segredo-evolution"
+    settings.identity_provider = "glpi"
+    app.dependency_overrides[get_glpi_client] = lambda: FakeGLPIClientRejectUnknownPhone()
+
+    try:
+        response = test_client.post(
+            "/api/v1/webhooks/whatsapp/evolution?secret=segredo-evolution",
+            json={
+                "event": "MESSAGES_UPSERT",
+                "data": {
+                    "key": {
+                        "remoteJid": "5511000000000@s.whatsapp.net",
+                        "fromMe": False,
+                        "id": "EVO-UNKNOWN-555",
+                    },
+                    "pushName": "Numero Desconhecido",
+                    "message": {"conversation": "Quero abrir um chamado"},
+                    "messageType": "conversation",
+                },
+            },
+        )
+    finally:
+        settings.evolution_webhook_secret = original_secret
+        settings.identity_provider = original_identity_provider
+        app.dependency_overrides.pop(get_glpi_client, None)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["processed_messages"] == 1
+    assert body["interactions"] == []
+    assert body["integration_mode"] == "noop"
+    assert "identidade autorizada" in body["ignored_events"][0]

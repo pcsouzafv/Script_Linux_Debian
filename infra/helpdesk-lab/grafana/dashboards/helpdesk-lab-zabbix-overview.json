@@ -1,0 +1,955 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(255, 255, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Total de problemas ativos no filtro atual.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 4
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH problem_hosts AS (SELECT p.eventid, p.severity, p.acknowledged, p.r_eventid, MAX(h.host) AS host_technical FROM problem p JOIN triggers t ON t.triggerid = p.objectid LEFT JOIN functions f ON f.triggerid = t.triggerid LEFT JOIN items i ON i.itemid = f.itemid LEFT JOIN hosts h ON h.hostid = i.hostid WHERE p.source = 0 AND p.object = 0 GROUP BY p.eventid, p.severity, p.acknowledged, p.r_eventid) SELECT COUNT(*) AS value FROM problem_hosts WHERE r_eventid IS NULL AND host_technical LIKE '${fleet}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Problemas abertos",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Problemas com severidade High ou Disaster.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH problem_hosts AS (SELECT p.eventid, p.severity, p.r_eventid, MAX(h.host) AS host_technical FROM problem p JOIN triggers t ON t.triggerid = p.objectid LEFT JOIN functions f ON f.triggerid = t.triggerid LEFT JOIN items i ON i.itemid = f.itemid LEFT JOIN hosts h ON h.hostid = i.hostid WHERE p.source = 0 AND p.object = 0 GROUP BY p.eventid, p.severity, p.r_eventid) SELECT COUNT(*) AS value FROM problem_hosts WHERE r_eventid IS NULL AND severity >= 4 AND host_technical LIKE '${fleet}'",
+          "refId": "A"
+        }
+      ],
+      "title": "High ou Disaster",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Problemas ativos ainda sem acknowledge.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH problem_hosts AS (SELECT p.eventid, p.acknowledged, p.r_eventid, MAX(h.host) AS host_technical FROM problem p JOIN triggers t ON t.triggerid = p.objectid LEFT JOIN functions f ON f.triggerid = t.triggerid LEFT JOIN items i ON i.itemid = f.itemid LEFT JOIN hosts h ON h.hostid = i.hostid WHERE p.source = 0 AND p.object = 0 GROUP BY p.eventid, p.acknowledged, p.r_eventid) SELECT COUNT(*) AS value FROM problem_hosts WHERE r_eventid IS NULL AND acknowledged = 0 AND host_technical LIKE '${fleet}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Sem acknowledge",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Quantidade de hosts com problemas ativos.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#5794F2",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 6
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH problem_hosts AS (SELECT p.eventid, p.r_eventid, MAX(COALESCE(NULLIF(h.name, ''), h.host)) AS host_display, MAX(h.host) AS host_technical FROM problem p JOIN triggers t ON t.triggerid = p.objectid LEFT JOIN functions f ON f.triggerid = t.triggerid LEFT JOIN items i ON i.itemid = f.itemid LEFT JOIN hosts h ON h.hostid = i.hostid WHERE p.source = 0 AND p.object = 0 GROUP BY p.eventid, p.r_eventid) SELECT COUNT(DISTINCT host_display) AS value FROM problem_hosts WHERE r_eventid IS NULL AND host_technical LIKE '${fleet}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Hosts impactados",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Volume de novos problemas no periodo, separado por severidade.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 22,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH problem_hosts AS (SELECT p.eventid, p.severity, p.clock, MAX(h.host) AS host_technical FROM problem p JOIN triggers t ON t.triggerid = p.objectid LEFT JOIN functions f ON f.triggerid = t.triggerid LEFT JOIN items i ON i.itemid = f.itemid LEFT JOIN hosts h ON h.hostid = i.hostid WHERE p.source = 0 AND p.object = 0 GROUP BY p.eventid, p.severity, p.clock) SELECT $__unixEpochGroupAlias(clock, $__interval), COUNT(*) AS value, CASE severity WHEN 5 THEN 'Disaster' WHEN 4 THEN 'High' WHEN 3 THEN 'Average' WHEN 2 THEN 'Warning' WHEN 1 THEN 'Info' ELSE 'Not classified' END AS metric FROM problem_hosts WHERE $__unixEpochFilter(clock) AND host_technical LIKE '${fleet}' GROUP BY time, metric ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Novos problemas por severidade",
+      "transparent": true,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Agrupamento dos incidentes ativos por tag de servico da trigger.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 12,
+        "minVizWidth": 8,
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "manual",
+        "valueMode": "color"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH problem_hosts AS (SELECT p.eventid, p.r_eventid, t.triggerid, MAX(h.host) AS host_technical FROM problem p JOIN triggers t ON t.triggerid = p.objectid LEFT JOIN functions f ON f.triggerid = t.triggerid LEFT JOIN items i ON i.itemid = f.itemid LEFT JOIN hosts h ON h.hostid = i.hostid WHERE p.source = 0 AND p.object = 0 GROUP BY p.eventid, p.r_eventid, t.triggerid), problem_services AS (SELECT ph.eventid, COALESCE(MAX(CASE WHEN tt.tag = 'service' THEN tt.value END), 'sem-tag') AS service FROM problem_hosts ph JOIN triggers t ON t.triggerid = ph.triggerid LEFT JOIN trigger_tag tt ON tt.triggerid = t.triggerid GROUP BY ph.eventid) SELECT ps.service AS metric, COUNT(*) AS value FROM problem_hosts ph JOIN problem_services ps ON ps.eventid = ph.eventid WHERE ph.r_eventid IS NULL AND ph.host_technical LIKE '${fleet}' GROUP BY ps.service ORDER BY value DESC, metric",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidentes ativos por servico",
+      "transparent": true,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Hosts com maior concentracao de problemas ativos.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-BlPu"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#5794F2",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 0,
+        "y": 12
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 80
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH problem_hosts AS (SELECT p.eventid, p.r_eventid, MAX(COALESCE(NULLIF(h.name, ''), h.host)) AS host_display, MAX(h.host) AS host_technical FROM problem p JOIN triggers t ON t.triggerid = p.objectid LEFT JOIN functions f ON f.triggerid = t.triggerid LEFT JOIN items i ON i.itemid = f.itemid LEFT JOIN hosts h ON h.hostid = i.hostid WHERE p.source = 0 AND p.object = 0 GROUP BY p.eventid, p.r_eventid) SELECT host_display AS metric, COUNT(*) AS value FROM problem_hosts WHERE r_eventid IS NULL AND host_technical LIKE '${fleet}' GROUP BY host_display ORDER BY value DESC, metric LIMIT 10",
+          "refId": "A"
+        }
+      ],
+      "title": "Top hosts com incidentes",
+      "transparent": true,
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Ultimo valor conhecido dos checks principais do host focal.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0,
+                  "text": "0"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 1,
+                  "text": "1"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 15,
+        "x": 9,
+        "y": 12
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT i.name AS Item, latest.value AS Valor, FROM_UNIXTIME(latest.clock) AS Atualizado_em FROM items i JOIN hosts h ON h.hostid = i.hostid JOIN (SELECT hu.itemid, hu.clock, hu.value FROM history_uint hu JOIN (SELECT itemid, MAX(clock) AS maxclock FROM history_uint GROUP BY itemid) lastval ON lastval.itemid = hu.itemid AND lastval.maxclock = hu.clock) latest ON latest.itemid = i.itemid WHERE h.host = '${focus_host}' AND (i.key_ = 'icmpping' OR i.key_ LIKE 'net.tcp.service[%') ORDER BY i.name",
+          "refId": "A"
+        }
+      ],
+      "title": "Checks atuais do host focal",
+      "transparent": true,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Tempo de resposta ICMP do host focal.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 18,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 2,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__unixEpochGroupAlias(h.clock, $__interval), AVG(h.value) AS value, 'ICMP response time' AS metric FROM history h JOIN items i ON i.itemid = h.itemid JOIN hosts ho ON ho.hostid = i.hostid WHERE $__unixEpochFilter(h.clock) AND ho.host = '${focus_host}' AND i.key_ = 'icmppingsec' GROUP BY time ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Latencia ICMP do host focal",
+      "transparent": true,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Checagens binaras do host focal ao longo do tempo.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": true,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 16,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 2,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "max": 1,
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__unixEpochGroupAlias(hu.clock, $__interval), AVG(hu.value) AS value, i.name AS metric FROM history_uint hu JOIN items i ON i.itemid = hu.itemid JOIN hosts h ON h.hostid = i.hostid WHERE $__unixEpochFilter(hu.clock) AND h.host = '${focus_host}' AND (i.key_ = 'icmpping' OR i.key_ LIKE 'net.tcp.service[%') GROUP BY time, metric ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Checks binarios do host focal",
+      "transparent": true,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "zabbix-db"
+      },
+      "description": "Tabela operacional com os problemas ainda abertos no Zabbix.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Severidade"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "Average": {
+                        "color": "orange",
+                        "index": 0,
+                        "text": "Average"
+                      },
+                      "Disaster": {
+                        "color": "dark-red",
+                        "index": 1,
+                        "text": "Disaster"
+                      },
+                      "High": {
+                        "color": "red",
+                        "index": 2,
+                        "text": "High"
+                      },
+                      "Info": {
+                        "color": "blue",
+                        "index": 3,
+                        "text": "Info"
+                      },
+                      "Not classified": {
+                        "color": "gray",
+                        "index": 4,
+                        "text": "Not classified"
+                      },
+                      "Warning": {
+                        "color": "yellow",
+                        "index": 5,
+                        "text": "Warning"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Aberto_em"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "zabbix-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH problem_hosts AS (SELECT p.eventid, p.name, p.severity, p.clock, p.acknowledged, p.r_eventid, t.manual_close, COALESCE(MAX(NULLIF(h.name, '')), MAX(h.host)) AS host_display, MAX(h.host) AS host_technical FROM problem p JOIN triggers t ON t.triggerid = p.objectid LEFT JOIN functions f ON f.triggerid = t.triggerid LEFT JOIN items i ON i.itemid = f.itemid LEFT JOIN hosts h ON h.hostid = i.hostid WHERE p.source = 0 AND p.object = 0 GROUP BY p.eventid, p.name, p.severity, p.clock, p.acknowledged, p.r_eventid, t.manual_close) SELECT eventid AS Evento, host_display AS Host, CASE severity WHEN 5 THEN 'Disaster' WHEN 4 THEN 'High' WHEN 3 THEN 'Average' WHEN 2 THEN 'Warning' WHEN 1 THEN 'Info' ELSE 'Not classified' END AS Severidade, name AS Problema, FROM_UNIXTIME(clock) AS Aberto_em, SEC_TO_TIME(GREATEST(UNIX_TIMESTAMP() - clock, 0)) AS Duracao, IF(acknowledged = 1, 'Sim', 'Nao') AS Acknowledged, IF(manual_close = 1, 'Sim', 'Nao') AS Manual_close FROM problem_hosts WHERE r_eventid IS NULL AND host_technical LIKE '${fleet}' ORDER BY severity DESC, clock DESC LIMIT 50",
+          "refId": "A"
+        }
+      ],
+      "title": "Fila ativa de problemas",
+      "transparent": true,
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "helpdesk",
+    "infra",
+    "zabbix",
+    "grafana"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": "%",
+        "current": {
+          "selected": true,
+          "text": "Todos",
+          "value": "%"
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "zabbix-db"
+        },
+        "definition": "SELECT h.host AS __value, COALESCE(NULLIF(h.name, ''), h.host) AS __text FROM hosts h WHERE h.flags IN (0, 4) AND h.status IN (0, 1) ORDER BY __text",
+        "description": "Filtro amplo para os paines de resumo.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Frota",
+        "multi": false,
+        "name": "fleet",
+        "options": [],
+        "query": "SELECT h.host AS __value, COALESCE(NULLIF(h.name, ''), h.host) AS __text FROM hosts h WHERE h.flags IN (0, 4) AND h.status IN (0, 1) ORDER BY __text",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "mysql",
+          "uid": "zabbix-db"
+        },
+        "definition": "SELECT h.host AS __value, COALESCE(NULLIF(h.name, ''), h.host) AS __text FROM hosts h WHERE h.flags IN (0, 4) AND h.status IN (0, 1) ORDER BY CASE WHEN h.host = 'local-machine' THEN 0 WHEN h.host LIKE 'docker-%' THEN 1 ELSE 2 END, __text",
+        "description": "Host usado nos paineis de drilldown operacional.",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Host focal",
+        "multi": false,
+        "name": "focus_host",
+        "options": [],
+        "query": "SELECT h.host AS __value, COALESCE(NULLIF(h.name, ''), h.host) AS __text FROM hosts h WHERE h.flags IN (0, 4) AND h.status IN (0, 1) ORDER BY CASE WHEN h.host = 'local-machine' THEN 0 WHEN h.host LIKE 'docker-%' THEN 1 ELSE 2 END, __text",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Ops Command Center - Zabbix Lab",
+  "uid": "helpdesk-lab-zbx",
+  "version": 1,
+  "weekStart": ""
+}

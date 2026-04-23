@@ -491,7 +491,8 @@ async def receive_meta_whatsapp_webhook(
 )
 async def receive_evolution_whatsapp_webhook(
     request: Request,
-    secret: str | None = Header(default=None, alias="X-Evolution-Webhook-Secret"),
+    secret_header: str | None = Header(default=None, alias="X-Evolution-Webhook-Secret"),
+    secret_query: str | None = Query(default=None, alias="secret"),
     settings: Settings = Depends(get_settings),
     whatsapp_client: WhatsAppClient = Depends(get_whatsapp_client),
     orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
@@ -503,7 +504,8 @@ async def receive_evolution_whatsapp_webhook(
         )
 
     raw_body = await request.body()
-    if not whatsapp_client.validate_evolution_webhook_secret(secret):
+    provided_secret = secret_header or secret_query
+    if not whatsapp_client.validate_evolution_webhook_secret(provided_secret):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Falha na validação do segredo do webhook da Evolution API.",

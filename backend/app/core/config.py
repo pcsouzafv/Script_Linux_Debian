@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     glpi_user_token: str | None = None
     glpi_username: str | None = None
     glpi_password: str | None = None
+    glpi_queue_group_map: dict[str, str] = {}
 
     zabbix_base_url: str | None = None
     zabbix_api_token: str | None = None
@@ -54,6 +55,7 @@ class Settings(BaseSettings):
     evolution_api_key: str | None = None
     evolution_instance_name: str | None = None
     evolution_webhook_secret: str | None = None
+    evolution_lid_phone_map: dict[str, str] = {}
 
     operational_postgres_dsn: str | None = None
     operational_postgres_schema: str = "helpdesk_platform"
@@ -633,6 +635,121 @@ class Settings(BaseSettings):
             return [str(item).strip() for item in parsed if str(item).strip()]
 
         return [item.strip() for item in normalized.split(",") if item.strip()]
+
+    @field_validator("glpi_queue_group_map", mode="before")
+    @classmethod
+    def normalize_glpi_queue_group_map(cls, value: object) -> dict[str, str]:
+        if value is None:
+            return {}
+
+        raw_items: object
+        if isinstance(value, dict):
+            raw_items = value.items()
+        else:
+            normalized = str(value).strip()
+            if not normalized:
+                return {}
+
+            if normalized.startswith("{"):
+                try:
+                    parsed = json.loads(normalized)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        "HELPDESK_GLPI_QUEUE_GROUP_MAP deve ser um objeto JSON ou uma lista de pares fila=grupo."
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise ValueError(
+                        "HELPDESK_GLPI_QUEUE_GROUP_MAP deve ser um objeto JSON ou uma lista de pares fila=grupo."
+                    )
+                raw_items = parsed.items()
+            else:
+                separator = ";" if ";" in normalized else ","
+                pairs: list[tuple[str, str]] = []
+                for chunk in normalized.split(separator):
+                    entry = chunk.strip()
+                    if not entry:
+                        continue
+                    if "=" not in entry:
+                        raise ValueError(
+                            "HELPDESK_GLPI_QUEUE_GROUP_MAP deve usar o formato fila=grupo."
+                        )
+                    queue_name, group_name = entry.split("=", 1)
+                    pairs.append((queue_name, group_name))
+                raw_items = pairs
+
+        normalized_mapping: dict[str, str] = {}
+        for queue_name, group_name in raw_items:
+            normalized_queue = str(queue_name).strip()
+            normalized_group = str(group_name).strip()
+            if not normalized_queue or not normalized_group:
+                continue
+            normalized_mapping[normalized_queue] = normalized_group
+
+        return normalized_mapping
+
+    @field_validator("evolution_lid_phone_map", mode="before")
+    @classmethod
+    def normalize_evolution_lid_phone_map(cls, value: object) -> dict[str, str]:
+        if value is None:
+            return {}
+
+        raw_items: object
+        if isinstance(value, dict):
+            raw_items = value.items()
+        else:
+            normalized = str(value).strip()
+            if not normalized:
+                return {}
+
+            if normalized.startswith("{"):
+                try:
+                    parsed = json.loads(normalized)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        "HELPDESK_EVOLUTION_LID_PHONE_MAP deve ser um objeto JSON ou uma lista de pares lid=telefone."
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise ValueError(
+                        "HELPDESK_EVOLUTION_LID_PHONE_MAP deve ser um objeto JSON ou uma lista de pares lid=telefone."
+                    )
+                raw_items = parsed.items()
+            else:
+                separator = ";" if ";" in normalized else ","
+                pairs: list[tuple[str, str]] = []
+                for chunk in normalized.split(separator):
+                    entry = chunk.strip()
+                    if not entry:
+                        continue
+                    if "=" not in entry:
+                        raise ValueError(
+                            "HELPDESK_EVOLUTION_LID_PHONE_MAP deve usar o formato lid=telefone."
+                        )
+                    lid, phone_number = entry.split("=", 1)
+                    pairs.append((lid, phone_number))
+                raw_items = pairs
+
+        normalized_mapping: dict[str, str] = {}
+        for lid, phone_number in raw_items:
+            normalized_lid = cls._normalize_evolution_lid_key(lid)
+            normalized_phone = str(phone_number).strip()
+            if not normalized_lid or not normalized_phone:
+                continue
+            if re.sub(r"\D+", "", normalized_phone) == "":
+                raise ValueError(
+                    "HELPDESK_EVOLUTION_LID_PHONE_MAP deve mapear cada LID para um telefone."
+                )
+            normalized_mapping[normalized_lid] = normalized_phone
+
+        return normalized_mapping
+
+    @staticmethod
+    def _normalize_evolution_lid_key(value: object) -> str | None:
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        candidate = normalized.split("@", maxsplit=1)[0].split(":", maxsplit=1)[0]
+        digits = re.sub(r"\D+", "", candidate)
+        return digits or None
 
 
 @lru_cache

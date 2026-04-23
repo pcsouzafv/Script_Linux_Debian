@@ -137,6 +137,60 @@ GENERIC_MESSAGES = {
 CANCEL_MESSAGES = {"cancelar", "reiniciar", "resetar"}
 TICKET_CLOSE_VERBS = ("finalizar", "encerrar", "fechar", "concluir")
 TICKET_CLOSE_NOUNS = ("chamado", "ticket")
+HELPDESK_SCOPE_KEYWORDS = (
+    "acesso",
+    "ajuda",
+    "app",
+    "aplica",
+    "atendimento",
+    "autentic",
+    "cadastro",
+    "camera",
+    "câmera",
+    "chamado",
+    "computador",
+    "conecta",
+    "credencial",
+    "email",
+    "erp",
+    "erro",
+    "falha",
+    "glpi",
+    "impressora",
+    "infra",
+    "internet",
+    "login",
+    "lento",
+    "lentidao",
+    "lentidão",
+    "liberar",
+    "mfa",
+    "microfone",
+    "monitor",
+    "mouse",
+    "nao consigo",
+    "não consigo",
+    "notebook",
+    "office",
+    "outlook",
+    "permiss",
+    "portal",
+    "problema",
+    "rede",
+    "senha",
+    "sistema",
+    "site",
+    "suporte",
+    "teams",
+    "teclado",
+    "ticket",
+    "ti",
+    "trav",
+    "usuario",
+    "usuário",
+    "vpn",
+    "wifi",
+)
 CONTEXT_SWITCH_MARKERS = (
     "agora preciso",
     "agora quero",
@@ -240,7 +294,7 @@ class UserIntakeService:
                 flow_name="user_ticket_finalization",
                 reply_text=(
                     "Nao encontrei chamados seus pendentes para finalizar no momento. "
-                    "Se precisar, envie uma nova descricao para abrir outro chamado."
+                    "Se ainda precisar de ajuda, me envie uma nova descricao do problema e eu sigo com o atendimento."
                 ),
                 notes=["Nenhum ticket elegível foi encontrado para finalização pelo usuário."],
             )
@@ -267,8 +321,8 @@ class UserIntakeService:
                 action="assistant",
                 flow_name="user_ticket_finalization",
                 reply_text=(
-                    "Nao ha uma seleção pendente para finalizar chamado. "
-                    "Envie 'finalizar chamado' para listar seus tickets."
+                    "Nao ha uma selecao pendente para finalizar chamado agora. "
+                    "Se quiser, envie 'finalizar chamado' e eu listo os tickets disponiveis."
                 ),
                 notes=["Usuário tentou selecionar ticket sem sessão ativa de finalização."],
             )
@@ -279,7 +333,10 @@ class UserIntakeService:
             return UserIntakeOutcome(
                 action="assistant",
                 flow_name="user_ticket_finalization",
-                reply_text="Finalização cancelada. Se quiser tentar de novo, envie 'finalizar chamado'.",
+                reply_text=(
+                    "Tudo certo, cancelei a finalizacao por aqui. "
+                    "Se quiser retomar depois, envie 'finalizar chamado'."
+                ),
                 notes=["Fluxo de finalização cancelado pelo usuário."],
             )
 
@@ -321,6 +378,15 @@ class UserIntakeService:
 
         session = await self._get_session(normalized_phone)
         if session is None:
+            if self._is_out_of_scope(text):
+                session = await self._get_or_create_session(normalized_phone, requester.display_name)
+                return self._build_scope_guidance(
+                    session,
+                    extra_note=(
+                        "Essa mensagem parece fora do escopo do atendimento."
+                    ),
+                )
+
             matched_item = self._match_catalog_item(text)
             if matched_item is None and not self._is_low_information(text) and self._is_descriptive(text):
                 matched_item = self._fallback_catalog_item()
@@ -344,9 +410,18 @@ class UserIntakeService:
             )
 
         session.requester_display_name = requester.display_name or session.requester_display_name
-        session.transcript.append(text)
 
         if session.stage == "awaiting_catalog":
+            if self._is_out_of_scope(text):
+                await self._save_session(session)
+                return self._build_scope_guidance(
+                    session,
+                    extra_note=(
+                        "Eu sigo com atendimento de helpdesk e abertura de chamados de TI."
+                    ),
+                )
+
+            session.transcript.append(text)
             matched_item = self._match_catalog_item(text)
             if matched_item is None and self._is_descriptive(text):
                 matched_item = self._fallback_catalog_item()
@@ -368,6 +443,11 @@ class UserIntakeService:
             return self._build_description_prompt(session, matched_item)
 
         selected_item = self._selected_item(session)
+        if self._is_out_of_scope(text):
+            await self._save_session(session)
+            return self._build_description_scope_guidance(session, selected_item)
+
+        session.transcript.append(text)
         remapped_item = self._match_catalog_item(text)
         if remapped_item and self._is_selection_only(text, remapped_item):
             session.selected_catalog_code = remapped_item.code
@@ -393,7 +473,9 @@ class UserIntakeService:
         extra_note: str,
     ) -> UserIntakeOutcome:
         reply_text = (
-            f"{extra_note} Responda com o numero da opcao ou descreva o problema com mais detalhes:\n"
+            f"{self._greeting_prefix(session.requester_display_name)}{extra_note}\n"
+            "Para eu classificar e encaminhar do jeito certo, responda com o numero da opcao "
+            "ou descreva o problema com mais detalhes:\n"
             + "\n".join(self.catalog_options())
         )
         return UserIntakeOutcome(
@@ -413,7 +495,9 @@ class UserIntakeService:
     ) -> UserIntakeOutcome:
         prefix = "Ainda preciso de mais contexto." if retry else "Entendi o tipo do chamado."
         reply_text = (
-            f"{prefix} Vou tratar como '{item.label}'. Agora me diga o que esta acontecendo, onde ocorre e desde quando. "
+            f"{self._greeting_prefix(session.requester_display_name)}{prefix} "
+            f"Vou tratar como '{item.label}'. Agora me diga o que esta acontecendo, "
+            "onde ocorre e desde quando. Se apareceu alguma mensagem de erro, pode copiar aqui.\n"
             "Exemplo: 'Nao consigo acessar o ERP desde 08:10'."
         )
         return UserIntakeOutcome(
@@ -426,6 +510,54 @@ class UserIntakeService:
             category=item.category,
             service_name=item.service_name,
             notes=["Catalogo identificado; aguardando descricao objetiva do problema."],
+        )
+
+    def _build_scope_guidance(
+        self,
+        session: UserIntakeSession,
+        *,
+        extra_note: str,
+    ) -> UserIntakeOutcome:
+        reply_text = (
+            f"{self._greeting_prefix(session.requester_display_name)}{extra_note}\n"
+            "Eu sou a assistente virtual do helpdesk e faço o primeiro atendimento para "
+            "orientar, classificar e abrir chamados de TI.\n"
+            "Posso ajudar com acesso, permissao, sistemas, rede, internet, equipamentos e outros incidentes de suporte.\n"
+            "Se quiser continuar, escolha uma opcao abaixo ou descreva o problema de TI que esta acontecendo:\n"
+            + "\n".join(self.catalog_options())
+        )
+        return UserIntakeOutcome(
+            action="assistant",
+            reply_text=reply_text,
+            available_options=self.catalog_options(),
+            intake_stage="awaiting_catalog",
+            notes=["Mensagem fora de escopo recebeu orientação sobre a finalidade do assistente."],
+        )
+
+    def _build_description_scope_guidance(
+        self,
+        session: UserIntakeSession,
+        item: TicketCatalogItem,
+    ) -> UserIntakeOutcome:
+        reply_text = (
+            f"{self._greeting_prefix(session.requester_display_name)}"
+            "Eu sou a assistente virtual do helpdesk e estou atendendo apenas demandas de suporte de TI.\n"
+            f"No momento, estou coletando os detalhes do chamado '{item.label}'.\n"
+            "Me diga o que esta acontecendo, onde ocorre e desde quando. "
+            "Se houver erro na tela, pode copiar a mensagem aqui."
+        )
+        return UserIntakeOutcome(
+            action="assistant",
+            reply_text=reply_text,
+            available_options=self.catalog_options(),
+            intake_stage="awaiting_description",
+            selected_option=f"{item.code}. {item.label}",
+            catalog_label=item.label,
+            category=item.category,
+            service_name=item.service_name,
+            notes=[
+                "Mensagem fora de escopo durante a coleta recebeu reorientação para o contexto do chamado."
+            ],
         )
 
     def _build_open_outcome(
@@ -454,10 +586,11 @@ class UserIntakeService:
             self._format_ticket_option(index + 1, option)
             for index, option in enumerate(session.ticket_options)
         ]
-        prefix = extra_note or "Encontrei estes chamados seus para finalizar."
+        prefix = extra_note or "Encontrei estes chamados seus que ainda podem ser finalizados."
         reply_text = (
-            f"{prefix} Responda com o numero da opcao ou com o ID do ticket desejado. "
-            "Digite cancelar para sair:\n"
+            f"{self._greeting_prefix(session.requester_display_name)}{prefix}\n"
+            "Me responda com o numero da opcao ou com o ID do ticket desejado. "
+            "Se quiser sair, digite cancelar:\n"
             + "\n".join(options)
         )
         return UserIntakeOutcome(
@@ -757,10 +890,52 @@ class UserIntakeService:
         words = normalized_text.split()
         return len(words) >= 4
 
+    def _is_helpdesk_related(self, text: str) -> bool:
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            return True
+        if normalized_text in GENERIC_MESSAGES or normalized_text in CANCEL_MESSAGES:
+            return True
+        if self.matches_ticket_finalization_intent(text):
+            return True
+        if self._match_catalog_item(text) is not None:
+            return True
+        return any(
+            self._contains_scope_keyword(normalized_text, keyword)
+            for keyword in HELPDESK_SCOPE_KEYWORDS
+        )
+
+    def _is_out_of_scope(self, text: str) -> bool:
+        if not self._is_descriptive(text):
+            return False
+        return not self._is_helpdesk_related(text)
+
+    def _contains_scope_keyword(self, normalized_text: str, keyword: str) -> bool:
+        normalized_keyword = self._normalize_text(keyword)
+        if not normalized_keyword:
+            return False
+        if " " in normalized_keyword:
+            return normalized_keyword in normalized_text
+        if len(normalized_keyword) <= 3:
+            return normalized_keyword in normalized_text.split()
+        return normalized_keyword in normalized_text
+
     def _signals_context_switch(self, text: str) -> bool:
         normalized_text = self._normalize_text(text)
         normalized_markers = {self._normalize_text(marker) for marker in CONTEXT_SWITCH_MARKERS}
         return any(marker in normalized_text for marker in normalized_markers)
+
+    def _greeting_prefix(self, requester_display_name: str | None) -> str:
+        first_name = self._first_name(requester_display_name)
+        if not first_name:
+            return ""
+        return f"{first_name}, "
+
+    def _first_name(self, requester_display_name: str | None) -> str | None:
+        if not requester_display_name:
+            return None
+        first_name = requester_display_name.strip().split(maxsplit=1)[0]
+        return first_name or None
 
     def _normalize_phone(self, phone_number: str) -> str:
         return "".join(character for character in str(phone_number) if character.isdigit())

@@ -99,24 +99,40 @@ flowchart LR
 ```text
 .
 ├── README.md
+├── install_debian12_full_stack.sh
 ├── backend/
 │   ├── README.md
 │   ├── app/
+│   ├── data/
 │   ├── tests/
-│   └── pyproject.toml
+│   ├── pyproject.toml
+│   ├── run_dev.sh
+│   ├── run_automation_worker.sh
+│   ├── run_glpi_analytics_sync.sh
+│   └── run_glpi_backfill.sh
 ├── docs/
+│   ├── aplicacoes-e-implantacao.md
 │   ├── arquitetura-helpdesk.md
+│   ├── ativacao-whatsapp.md
 │   ├── automacoes-sugeridas.md
+│   ├── checklist-go-live.md
+│   ├── fase-5-operacao-avancada.md
+│   ├── fechamento-mvp.md
+│   ├── glpi-dados-analytics-ml.md
+│   ├── implantacao-ambiente-existente.md
+│   ├── implantacao-empresa.md
+│   ├── langgraph-autonomia-ambiente-monitorado.md
+│   ├── portas-e-conectividade.md
 │   └── roadmap.md
 ├── infra/
 │   ├── README.md
 │   ├── automation-runner/
 │   ├── backend/
+│   ├── evolution/
 │   ├── glpi/
 │   ├── helpdesk-lab/
 │   ├── observability/
 │   └── zabbix/
-├── install_debian12_full_stack.sh
 ```
 
 ## Documentação complementar
@@ -125,10 +141,13 @@ flowchart LR
 - [Aplicações e estratégia de implantação](docs/aplicacoes-e-implantacao.md)
 - [Guia passo a passo para implantação em empresa](docs/implantacao-empresa.md)
 - [Guia para empresa com GLPI e Zabbix ja existentes](docs/implantacao-ambiente-existente.md)
+- [Ativação do WhatsApp com Evolution API](docs/ativacao-whatsapp.md)
 - [Checklist de fechamento do MVP](docs/fechamento-mvp.md)
 - [Checklist executivo de go-live](docs/checklist-go-live.md)
 - [Fase 5: Operacao avancada](docs/fase-5-operacao-avancada.md)
 - [Catálogo inicial de automações e agentes](docs/automacoes-sugeridas.md)
+- [Dados do GLPI para Analytics e ML](docs/glpi-dados-analytics-ml.md)
+- [Autonomia com LangGraph em ambiente monitorado](docs/langgraph-autonomia-ambiente-monitorado.md)
 - [Portas e conectividade](docs/portas-e-conectividade.md)
 - [Roadmap de implantação](docs/roadmap.md)
 - [Guia do backend MVP](backend/README.md)
@@ -152,7 +171,7 @@ flowchart LR
 ## Hierarquia operacional no MVP
 
 - O backend já consegue resolver o papel do remetente a partir do número de telefone usando o diretório local de identidades.
-- A base inicial fica em [backend/data/identities.json](/home/ricardo/Script_Linux_Debian/backend/data/identities.json).
+- A base inicial fica em [backend/data/identities.json](backend/data/identities.json).
 - Isso permite distinguir usuário final, técnico, supervisor e admin nos fluxos do WhatsApp antes de integrar uma base corporativa real.
 - Técnicos, supervisores e admins já podem usar comandos operacionais via WhatsApp com prefixo `/`, sem misturar esse fluxo com abertura de chamado.
 - O mesmo diretório local também pode mapear `glpi_user_id` para vincular o solicitante real durante a criação do ticket no GLPI.
@@ -170,14 +189,14 @@ flowchart LR
 Com o stack do laboratorio ativo em `infra/helpdesk-lab`, o fluxo de integracao e seed fica:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/infra/helpdesk-lab
+cd infra/helpdesk-lab
 ./scripts/seed-test-data.sh
 ```
 
 Depois:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/backend
+cd backend
 ./run_dev.sh
 ```
 

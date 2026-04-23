@@ -135,3 +135,72 @@ def test_settings_rejects_invalid_automation_runner_timeout() -> None:
             _env_file=None,
             automation_runner_timeout_seconds=0,
         )
+
+
+def test_settings_parse_glpi_queue_group_map_from_json() -> None:
+    settings = Settings(
+        _env_file=None,
+        glpi_queue_group_map='{"ServiceDesk-N1":"TI > Service Desk > N1","Infraestrutura-N1":"TI > Infraestrutura > N1"}',
+    )
+
+    assert settings.glpi_queue_group_map == {
+        "ServiceDesk-N1": "TI > Service Desk > N1",
+        "Infraestrutura-N1": "TI > Infraestrutura > N1",
+    }
+
+
+def test_settings_parse_glpi_queue_group_map_from_pairs() -> None:
+    settings = Settings(
+        _env_file=None,
+        glpi_queue_group_map=(
+            "ServiceDesk-Acessos=TI > Service Desk > Acessos;"
+            "NOC-Critico=TI > NOC > Critico"
+        ),
+    )
+
+    assert settings.glpi_queue_group_map == {
+        "ServiceDesk-Acessos": "TI > Service Desk > Acessos",
+        "NOC-Critico": "TI > NOC > Critico",
+    }
+
+
+def test_settings_parse_evolution_lid_phone_map_from_json() -> None:
+    settings = Settings(
+        _env_file=None,
+        evolution_lid_phone_map='{"220095666237694@lid":"+5521972008679"}',
+    )
+
+    assert settings.evolution_lid_phone_map == {
+        "220095666237694": "+5521972008679",
+    }
+
+
+def test_settings_parse_evolution_lid_phone_map_from_pairs() -> None:
+    settings = Settings(
+        _env_file=None,
+        evolution_lid_phone_map=(
+            "220095666237694@lid=+5521972008679;"
+            "998877665544332=+5511912345678"
+        ),
+    )
+
+    assert settings.evolution_lid_phone_map == {
+        "220095666237694": "+5521972008679",
+        "998877665544332": "+5511912345678",
+    }
+
+
+def test_settings_rejects_invalid_glpi_queue_group_map_pairs() -> None:
+    with pytest.raises(ValueError, match="GLPI_QUEUE_GROUP_MAP"):
+        Settings(
+            _env_file=None,
+            glpi_queue_group_map="ServiceDesk-N1",
+        )
+
+
+def test_settings_rejects_invalid_evolution_lid_phone_map_pairs() -> None:
+    with pytest.raises(ValueError, match="EVOLUTION_LID_PHONE_MAP"):
+        Settings(
+            _env_file=None,
+            evolution_lid_phone_map="220095666237694",
+        )

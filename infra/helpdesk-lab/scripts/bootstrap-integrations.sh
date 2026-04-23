@@ -44,6 +44,10 @@ WHERE NOT EXISTS (
     FROM ${GLPI_DB_NAME}.glpi_apiclients
     WHERE name = 'helpdesk-lab-docker-bridge'
 );
+
+CREATE USER IF NOT EXISTS '${GRAFANA_ZABBIX_DB_USER}'@'%' IDENTIFIED BY '${GRAFANA_ZABBIX_DB_PASSWORD}';
+GRANT SELECT ON ${ZABBIX_DB_NAME}.* TO '${GRAFANA_ZABBIX_DB_USER}'@'%';
+FLUSH PRIVILEGES;
 SQL
 
 GLPI_SESSION="$(
@@ -92,6 +96,7 @@ upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_GLPI_APP_TOKEN" ""
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_GLPI_USER_TOKEN" ""
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_GLPI_USERNAME" "glpi"
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_GLPI_PASSWORD" "glpi"
+upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_GLPI_QUEUE_GROUP_MAP" '{"ServiceDesk-N1":"TI > Service Desk > N1","ServiceDesk-Acessos":"TI > Service Desk > Acessos","Infraestrutura-N1":"TI > Infraestrutura > N1","NOC-Critico":"TI > NOC > Critico"}'
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_ZABBIX_BASE_URL" "http://127.0.0.1:${ZABBIX_WEB_HOST_PORT}/api_jsonrpc.php"
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_ZABBIX_API_TOKEN" ""
 upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_ZABBIX_USERNAME" "Admin"
@@ -103,6 +108,8 @@ upsert_env_key "$BACKEND_ENV_FILE" "HELPDESK_REDIS_URL" "redis://:${ENCODED_REDI
 echo "Integracoes do laboratorio bootstrapadas com sucesso."
 echo "GLPI API: http://127.0.0.1:${GLPI_HOST_PORT}/apirest.php"
 echo "Zabbix API: http://127.0.0.1:${ZABBIX_WEB_HOST_PORT}/api_jsonrpc.php"
+echo "Grafana: http://127.0.0.1:${GRAFANA_HOST_PORT}"
+echo "Grafana admin: ${GRAFANA_ADMIN_USER}"
 echo "PostgreSQL operacional: postgresql://${OPS_POSTGRES_USER}:***@127.0.0.1:${POSTGRES_HOST_PORT}/${OPS_POSTGRES_DB}"
 echo "Redis operacional: redis://:***@127.0.0.1:${REDIS_HOST_PORT}/0"
 echo "Backend .env alinhado para usar o laboratorio."

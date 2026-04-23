@@ -68,6 +68,7 @@ case "$PROFILE" in
         ;;
     zabbix)
         check_port_free "${ZABBIX_WEB_HOST_PORT}" || exit 1
+        check_port_free "${GRAFANA_HOST_PORT}" || exit 1
         ;;
     ops)
         check_port_free "${POSTGRES_HOST_PORT}" || exit 1
@@ -76,6 +77,7 @@ case "$PROFILE" in
     full|all)
         check_port_free "${GLPI_HOST_PORT}" || exit 1
         check_port_free "${ZABBIX_WEB_HOST_PORT}" || exit 1
+        check_port_free "${GRAFANA_HOST_PORT}" || exit 1
         check_port_free "${POSTGRES_HOST_PORT}" || exit 1
         check_port_free "${REDIS_HOST_PORT}" || exit 1
         ;;
@@ -93,6 +95,7 @@ case "$PROFILE" in
         ;;
     zabbix)
         echo "Zabbix usara 127.0.0.1:${ZABBIX_WEB_HOST_PORT}"
+        echo "Grafana usara 127.0.0.1:${GRAFANA_HOST_PORT}"
         ;;
     ops)
         echo "PostgreSQL operacional usara 127.0.0.1:${POSTGRES_HOST_PORT}"
@@ -101,6 +104,7 @@ case "$PROFILE" in
     full|all)
         echo "GLPI usara 127.0.0.1:${GLPI_HOST_PORT}"
         echo "Zabbix usara 127.0.0.1:${ZABBIX_WEB_HOST_PORT}"
+        echo "Grafana usara 127.0.0.1:${GRAFANA_HOST_PORT}"
         echo "PostgreSQL operacional usara 127.0.0.1:${POSTGRES_HOST_PORT}"
         echo "Redis operacional usara 127.0.0.1:${REDIS_HOST_PORT}"
         ;;

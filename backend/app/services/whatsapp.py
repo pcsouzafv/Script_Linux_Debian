@@ -252,7 +252,7 @@ class WhatsAppClient:
                 ignored_events.append(f"Mensagem ignorada: grupo {remote_jid} não é suportado no MVP.")
                 continue
 
-            sender_phone = self._extract_phone_from_jid(remote_jid)
+            sender_phone = self._resolve_evolution_sender_phone(remote_jid)
             if not sender_phone:
                 ignored_events.append(
                     f"Mensagem ignorada: JID {remote_jid} não pôde ser convertido em número."
@@ -533,6 +533,28 @@ class WhatsAppClient:
             return value.split("@", maxsplit=1)[0].split(":", maxsplit=1)[0]
         digits = re.sub(r"\D+", "", value)
         return digits or value
+
+    def _resolve_evolution_sender_phone(self, jid: str) -> str | None:
+        if self._is_evolution_lid_jid(jid):
+            return self._lookup_evolution_lid_phone(jid)
+        return self._extract_phone_from_jid(jid)
+
+    def _lookup_evolution_lid_phone(self, jid: str) -> str | None:
+        lid_key = self._normalize_evolution_lid_key(jid)
+        if not lid_key:
+            return None
+        phone_number = self.settings.evolution_lid_phone_map.get(lid_key)
+        if not phone_number:
+            return None
+        return phone_number
+
+    def _is_evolution_lid_jid(self, jid: str) -> bool:
+        return jid.lower().split(":", maxsplit=1)[0].endswith("@lid")
+
+    def _normalize_evolution_lid_key(self, jid: str) -> str | None:
+        candidate = jid.split("@", maxsplit=1)[0].split(":", maxsplit=1)[0]
+        digits = re.sub(r"\D+", "", candidate)
+        return digits or None
 
     def _extract_phone_from_jid(self, jid: str) -> str | None:
         candidate = jid.split("@", maxsplit=1)[0].split(":", maxsplit=1)[0]

@@ -4,7 +4,7 @@
 
 Este documento consolida o que ainda precisa estar resolvido para considerar o MVP pronto para piloto controlado ou producao assistida.
 
-Ele nao substitui o [checklist executivo de go-live](docs/checklist-go-live.md). A ideia aqui e separar o que ainda e lacuna de entrega do que ja e rotina de liberacao.
+Ele nao substitui o [checklist executivo de go-live](checklist-go-live.md). A ideia aqui e separar o que ainda e lacuna de entrega do que ja e rotina de liberacao.
 
 ## Definicao pratica de pronto
 
@@ -100,7 +100,7 @@ Detalhamento recomendado de execucao: [Fase 5: Operacao Avancada](fase-5-operaca
 2. Fechar ambiente alvo com `DNS`, `TLS`, segredos e rollback.
 3. Validar integracoes reais de `GLPI`, `Zabbix` e WhatsApp.
 4. Publicar persistencia operacional e worker fora do laboratorio.
-5. Executar o [checklist executivo de go-live](docs/checklist-go-live.md).
+5. Executar o [checklist executivo de go-live](checklist-go-live.md).
 
 ## Leitura objetiva do estado atual
 

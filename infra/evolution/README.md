@@ -33,7 +33,7 @@ infra/evolution/
 Opcionalmente copie o exemplo de ambiente:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/infra/evolution
+cd infra/evolution
 cp .env.example .env
 ```
 

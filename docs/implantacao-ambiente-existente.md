@@ -13,7 +13,7 @@ Use este roteiro quando a empresa:
 - quer habilitar atendimento por WhatsApp sem trocar a base atual;
 - quer introduzir o backend de orquestracao com o menor impacto possivel.
 
-Se a empresa ainda nao tem `GLPI` e `Zabbix`, use primeiro o guia [docs/implantacao-empresa.md](/home/ricardo/Script_Linux_Debian/docs/implantacao-empresa.md).
+Se a empresa ainda nao tem `GLPI` e `Zabbix`, use primeiro o guia [implantacao-empresa.md](implantacao-empresa.md).
 
 ## Principio de implantacao
 
@@ -122,6 +122,7 @@ HELPDESK_IDENTITY_GLPI_USER_PROFILES=Self-Service
 HELPDESK_IDENTITY_GLPI_TECHNICIAN_PROFILES=Technician
 HELPDESK_IDENTITY_GLPI_SUPERVISOR_PROFILES=Supervisor
 HELPDESK_IDENTITY_GLPI_ADMIN_PROFILES=Super-Admin,Admin,Administrator
+HELPDESK_GLPI_QUEUE_GROUP_MAP={"ServiceDesk-N1":"TI > Service Desk > N1","ServiceDesk-Acessos":"TI > Service Desk > Acessos","Infraestrutura-N1":"TI > Infraestrutura > N1","NOC-Critico":"TI > NOC > Critico"}
 
 HELPDESK_GLPI_BASE_URL=https://glpi.empresa.local/apirest.php
 HELPDESK_GLPI_APP_TOKEN=
@@ -138,6 +139,8 @@ HELPDESK_EVOLUTION_WEBHOOK_SECRET=
 
 HELPDESK_LLM_ENABLED=false
 ```
+
+Use `HELPDESK_GLPI_QUEUE_GROUP_MAP` quando a hierarquia dos profissionais no GLPI nao tiver o mesmo nome das filas logicas do backend. Assim o agente continua decidindo a fila operacional e o backend grava o grupo responsavel correto no GLPI.
 
 Recomendacao de risco para producao inicial:
 
@@ -210,7 +213,7 @@ Tambem valide com a equipe da empresa:
 Use o apoio operacional do repositorio:
 
 ```bash
-cd /home/ricardo/Script_Linux_Debian/infra/evolution
+cd infra/evolution
 cp .env.example .env
 ./configure_webhook.sh https://bot.empresa.local/api/v1/webhooks/whatsapp/evolution
 ```

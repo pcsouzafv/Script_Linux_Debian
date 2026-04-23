@@ -29,7 +29,7 @@ O backend agora usa as variáveis abaixo:
 - `HELPDESK_API_PORT_MAX`
 - `HELPDESK_API_PORT_STRICT`
 
-O script [backend/run_dev.sh](/home/ricardo/Script_Linux_Debian/backend/run_dev.sh) sobe a API com estas regras:
+O script [backend/run_dev.sh](../backend/run_dev.sh) sobe a API com estas regras:
 
 - Tenta primeiro a porta definida em `HELPDESK_API_PORT`.
 - Se a porta estiver ocupada e `HELPDESK_API_PORT_STRICT=false`, procura a próxima porta livre até `HELPDESK_API_PORT_MAX`.
@@ -51,7 +51,7 @@ cd backend
 
 ## Instalador Debian
 
-O instalador [install_debian12_full_stack.sh](/home/ricardo/Script_Linux_Debian/install_debian12_full_stack.sh) agora valida previamente se as portas críticas do host já estão ocupadas. Se encontrar conflito, ele aborta antes de alterar Apache, Zabbix ou MariaDB.
+O instalador [install_debian12_full_stack.sh](../install_debian12_full_stack.sh) agora valida previamente se as portas críticas do host já estão ocupadas. Se encontrar conflito, ele aborta antes de alterar Apache, Zabbix ou MariaDB.
 
 Isso é importante quando o host já executa aplicações publicadas por Docker.
 

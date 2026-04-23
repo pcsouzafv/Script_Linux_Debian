@@ -11,7 +11,7 @@ case "$PROFILE" in
         services=(db glpi)
         ;;
     zabbix)
-        services=(db zabbix-server zabbix-web)
+        services=(db zabbix-server zabbix-web grafana)
         ;;
     ops)
         PROFILE="ops"
@@ -19,7 +19,7 @@ case "$PROFILE" in
         ;;
     full|all)
         PROFILE="full"
-        services=(db glpi zabbix-server zabbix-web postgres redis)
+        services=(db glpi zabbix-server zabbix-web grafana postgres redis)
         ;;
     *)
         echo "Uso: ./scripts/pull.sh [glpi|zabbix|ops|full]" >&2
@@ -29,4 +29,3 @@ esac
 
 cd "$LAB_DIR"
 docker compose --profile "$PROFILE" pull "${services[@]}"
-

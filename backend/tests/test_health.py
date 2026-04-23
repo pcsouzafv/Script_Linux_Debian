@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 import app.services.operational_store as operational_store_module
 
 from app.core.config import get_settings
+from app.core.dependencies import get_glpi_client, get_zabbix_client
 from app.main import app
 from app.services.docker_runtime import (
     DockerApplicationRecord,
@@ -16,6 +17,7 @@ from app.services.docker_runtime import (
     DockerRuntimeClient,
     DockerRuntimeSnapshot,
 )
+from app.services.exceptions import ResourceNotFoundError
 from app.services.glpi import MOCK_TICKET_STORE
 from app.services.job_queue import JobQueueService
 from app.services.operational_store import (
@@ -25,6 +27,7 @@ from app.services.operational_store import (
 )
 from app.services.ticket_analytics_store import TicketAnalyticsSnapshotRecord, TicketAnalyticsStore
 from app.services.triage import TriageAgent
+from app.schemas.helpdesk import CorrelatedEvent
 
 
 client = TestClient(app)
@@ -1589,6 +1592,37 @@ def test_open_ticket_routes_operational_identity_access_ticket_to_infra_queue() 
     assert body["routed_to"] == "Infraestrutura-N1"
 
 
+def test_open_ticket_exposes_mapped_glpi_assignment_group_in_response() -> None:
+    settings = get_settings()
+    original_mapping = dict(settings.glpi_queue_group_map)
+    settings.glpi_queue_group_map = {
+        "ServiceDesk-Acessos": "TI > Service Desk > Acessos",
+    }
+
+    payload = {
+        "subject": "WhatsApp: Sem acesso ao ERP",
+        "description": "Usuaria final relata erro de login no ERP desde o inicio do expediente.",
+        "category": "acesso",
+        "requester": {
+            "external_id": "user-maria-santos",
+            "display_name": "Maria Santos",
+            "phone_number": "+5521997775269",
+            "role": "user",
+        },
+    }
+
+    try:
+        response = client.post("/api/v1/helpdesk/tickets/open", json=payload)
+    finally:
+        settings.glpi_queue_group_map = original_mapping
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["routed_to"] == "ServiceDesk-Acessos"
+    assert body["glpi_assignment_group_id"] is None
+    assert body["glpi_assignment_group_name"] == "TI > Service Desk > Acessos"
+
+
 def test_open_ticket_generates_unique_mock_ids_even_when_time_source_repeats(
     monkeypatch,
 ) -> None:
@@ -1671,6 +1705,8 @@ def test_whatsapp_message_uses_identity_directory_role() -> None:
     assert body["identity_source"] == "directory"
     assert body["assistant_result"]["flow_name"] == "technician_operations"
     assert "Não abri chamado automaticamente" in body["assistant_result"]["reply_text"]
+    assert "/help" in body["assistant_result"]["reply_text"]
+    assert "/open" in body["assistant_result"]["reply_text"]
 
 
 def test_raw_whatsapp_messages_endpoint_requires_api_token() -> None:
@@ -1703,6 +1739,40 @@ def test_user_whatsapp_message_opens_ticket_by_default() -> None:
     assert body["outcome_type"] == "ticket"
     assert body["requester_role"] == "user"
     assert body["ticket"]["requester_glpi_user_id"] == 101
+
+
+def test_glpi_identity_provider_rejects_unknown_whatsapp_number() -> None:
+    class FakeGLPIClientRejectUnknownPhone:
+        configured = True
+
+        async def find_user_by_phone(self, phone_number: str):
+            raise ResourceNotFoundError(
+                f"Nenhum usuario GLPI ativo encontrado para numero {phone_number}."
+            )
+
+    settings = get_settings()
+    original_identity_provider = settings.identity_provider
+    app.dependency_overrides[get_glpi_client] = lambda: FakeGLPIClientRejectUnknownPhone()
+    settings.identity_provider = "glpi"
+
+    try:
+        response = client.post(
+            "/api/v1/webhooks/whatsapp/messages",
+            json={
+                "sender_phone": "+5511000000000",
+                "sender_name": "Numero Desconhecido",
+                "text": "Quero abrir um chamado.",
+                "requester_role": "user",
+            },
+        )
+    finally:
+        settings.identity_provider = original_identity_provider
+        app.dependency_overrides.pop(get_glpi_client, None)
+
+    assert response.status_code == 403
+    detail = response.json()["detail"].lower()
+    assert "autorizado" in detail
+    assert "glpi" in detail
 
 
 def test_user_ticket_description_uses_identity_resolved_by_phone_for_sender() -> None:
@@ -1750,6 +1820,56 @@ def test_user_greeting_starts_catalog_intake() -> None:
     assert body["assistant_result"]["intake_stage"] == "awaiting_catalog"
     assert any(option.startswith("1. ") for option in body["assistant_result"]["available_options"])
     assert "classificar" in body["assistant_result"]["reply_text"].lower()
+    assert "descreva o problema" in body["assistant_result"]["reply_text"].lower()
+
+
+def test_user_out_of_scope_message_gets_oriented_about_helpdesk_purpose() -> None:
+    response = client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5521997775269",
+            "sender_name": "Maria Santos",
+            "text": "Quero uma receita de bolo de cenoura para hoje.",
+            "requester_role": "user",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["outcome_type"] == "assistant"
+    assert body["assistant_result"]["flow_name"] == "user_catalog_intake"
+    assert body["assistant_result"]["intake_stage"] == "awaiting_catalog"
+    assert "assistente virtual do helpdesk" in body["assistant_result"]["reply_text"].lower()
+    assert "abrir chamados de ti" in body["assistant_result"]["reply_text"].lower()
+
+
+def test_user_out_of_scope_message_during_description_reorients_without_opening_ticket() -> None:
+    client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5521997775269",
+            "sender_name": "Maria Santos",
+            "text": "1",
+            "requester_role": "user",
+        },
+    )
+
+    response = client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5521997775269",
+            "sender_name": "Maria Santos",
+            "text": "Me conta uma piada antes da gente continuar.",
+            "requester_role": "user",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["outcome_type"] == "assistant"
+    assert body["assistant_result"]["intake_stage"] == "awaiting_description"
+    assert "assistente virtual do helpdesk" in body["assistant_result"]["reply_text"].lower()
+    assert "coletando os detalhes do chamado" in body["assistant_result"]["reply_text"].lower()
 
 
 def test_user_catalog_sequence_collects_context_before_opening_ticket() -> None:
@@ -2284,6 +2404,74 @@ def test_technician_command_returns_operational_result() -> None:
     assert body["requester_glpi_user_id"] == 201
 
 
+def test_supervisor_slash_shortcut_returns_help_instead_of_forbidden() -> None:
+    payload = {
+        "sender_phone": "+5521972008679",
+        "sender_name": "Paula Almeida",
+        "text": "/",
+        "requester_role": "user",
+    }
+
+    response = client.post("/api/v1/webhooks/whatsapp/messages", json=payload)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["outcome_type"] == "command"
+    assert body["requester_role"] == "supervisor"
+    assert body["command_result"]["command_name"] == "help"
+    assert body["command_result"]["status"] == "completed"
+    assert "/assign" in body["command_result"]["reply_text"]
+    assert "modo operacional ativo" in body["command_result"]["reply_text"].lower()
+    assert "não possui permissão" not in body["command_result"]["reply_text"]
+
+
+def test_evolution_duplicate_entrar_message_is_ignored_after_first_reply() -> None:
+    settings = get_settings()
+    original_secret = settings.evolution_webhook_secret
+    settings.evolution_webhook_secret = "segredo-evolution"
+
+    payload = {
+        "event": "MESSAGES_UPSERT",
+        "data": {
+            "key": {
+                "remoteJid": "5521972008679@s.whatsapp.net",
+                "fromMe": False,
+                "id": "EVO-DUP-ENTRAR-001",
+            },
+            "pushName": "Paula Almeida",
+            "message": {"conversation": "/entrar"},
+            "messageType": "conversation",
+        },
+    }
+
+    try:
+        first_response = client.post(
+            "/api/v1/webhooks/whatsapp/evolution",
+            json=payload,
+            headers={"X-Evolution-Webhook-Secret": "segredo-evolution"},
+        )
+        second_response = client.post(
+            "/api/v1/webhooks/whatsapp/evolution",
+            json=payload,
+            headers={"X-Evolution-Webhook-Secret": "segredo-evolution"},
+        )
+    finally:
+        settings.evolution_webhook_secret = original_secret
+
+    assert first_response.status_code == 202
+    first_body = first_response.json()
+    assert len(first_body["interactions"]) == 1
+    assert first_body["interactions"][0]["command_result"]["command_name"] == "help"
+    assert first_body["interactions"][0]["command_result"]["status"] == "completed"
+    assert "não possui permissão" not in first_body["interactions"][0]["command_result"]["reply_text"]
+
+    assert second_response.status_code == 202
+    second_body = second_response.json()
+    assert second_body["interactions"] == []
+    assert second_body["integration_mode"] == "noop"
+    assert any("duplicada" in event for event in second_body["ignored_events"])
+
+
 def test_technician_ticket_command_reads_existing_ticket() -> None:
     create_payload = {
         "subject": "Servidor de banco sem resposta",
@@ -2466,6 +2654,91 @@ def test_technician_status_solved_records_solution_and_notifies_requester() -> N
     assert "Resumo da resolucao:" in MOCK_TICKET_STORE[ticket_id].solutions[0]["content"]
 
 
+def test_technician_status_solved_reconciles_zabbix_problem() -> None:
+    class FakeZabbixClient:
+        def __init__(self) -> None:
+            self.reconcile_calls: list[dict[str, object]] = []
+
+        async def find_related_events(self, asset_name: str | None, service_name: str | None, limit: int = 5):
+            return [
+                CorrelatedEvent(
+                    source="zabbix",
+                    event_id="99101",
+                    severity="4",
+                    summary="VPN indisponivel para a filial",
+                    host="vpn-edge-01",
+                )
+            ], "live", ["Correlação fake do Zabbix."]
+
+        async def reconcile_problem_events(
+            self,
+            *,
+            event_ids: list[str] | None = None,
+            asset_name: str | None = None,
+            service_name: str | None = None,
+            message: str,
+            close_problem: bool = False,
+            limit: int = 10,
+        ):
+            self.reconcile_calls.append(
+                {
+                    "event_ids": event_ids,
+                    "asset_name": asset_name,
+                    "service_name": service_name,
+                    "message": message,
+                    "close_problem": close_problem,
+                }
+            )
+
+            class _Result:
+                status = "acknowledged"
+                mode = "live"
+                event_ids = ["99101"]
+                notes = ["Problema correlacionado anotado no Zabbix."]
+
+            return _Result()
+
+    fake_zabbix = FakeZabbixClient()
+    app.dependency_overrides[get_zabbix_client] = lambda: fake_zabbix
+
+    try:
+        create_payload = {
+            "subject": "VPN intermitente na filial",
+            "description": "A conexao da filial cai diversas vezes ao dia.",
+            "category": "rede",
+            "asset_name": "vpn-edge-01",
+            "service_name": "vpn",
+            "priority": "high",
+            "requester": {
+                "external_id": "user-201",
+                "display_name": "Renata Melo",
+                "phone_number": "+5511944443333",
+                "role": "user",
+            },
+        }
+        ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=create_payload).json()["ticket_id"]
+
+        response = client.post(
+            "/api/v1/webhooks/whatsapp/messages",
+            json={
+                "sender_phone": "+5511912345678",
+                "sender_name": "Ana Souza",
+                "text": f"/status {ticket_id} solved",
+                "requester_role": "user",
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_zabbix_client, None)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["command_result"]["ticket"]["status"] == "solved"
+    assert "zabbix" in body["command_result"]["reply_text"].lower()
+    assert fake_zabbix.reconcile_calls
+    assert fake_zabbix.reconcile_calls[-1]["event_ids"] == ["99101"]
+    assert fake_zabbix.reconcile_calls[-1]["close_problem"] is False
+
+
 def test_technician_status_command_denies_closed_status() -> None:
     create_payload = {
         "subject": "Chamado para validação",
@@ -2496,6 +2769,106 @@ def test_technician_status_command_denies_closed_status() -> None:
     assert response.status_code == 202
     body = response.json()
     assert body["command_result"]["status"] == "forbidden"
+
+
+def test_user_ticket_finalization_reconciles_zabbix_problem_close() -> None:
+    class FakeZabbixClient:
+        def __init__(self) -> None:
+            self.reconcile_calls: list[dict[str, object]] = []
+
+        async def find_related_events(self, asset_name: str | None, service_name: str | None, limit: int = 5):
+            return [
+                CorrelatedEvent(
+                    source="zabbix",
+                    event_id="88221",
+                    severity="5",
+                    summary="ERP indisponivel no financeiro",
+                    host="erp-fin-01",
+                )
+            ], "live", ["Correlação fake do Zabbix."]
+
+        async def reconcile_problem_events(
+            self,
+            *,
+            event_ids: list[str] | None = None,
+            asset_name: str | None = None,
+            service_name: str | None = None,
+            message: str,
+            close_problem: bool = False,
+            limit: int = 10,
+        ):
+            self.reconcile_calls.append(
+                {
+                    "event_ids": event_ids,
+                    "asset_name": asset_name,
+                    "service_name": service_name,
+                    "message": message,
+                    "close_problem": close_problem,
+                }
+            )
+
+            class _Result:
+                status = "closed"
+                mode = "live"
+                event_ids = ["88221"]
+                notes = ["Problema correlacionado reconciliado no Zabbix."]
+
+            return _Result()
+
+    fake_zabbix = FakeZabbixClient()
+    app.dependency_overrides[get_zabbix_client] = lambda: fake_zabbix
+
+    try:
+        ticket_id = client.post(
+            "/api/v1/helpdesk/tickets/open",
+            json={
+                "subject": "ERP indisponivel para o financeiro",
+                "description": "Usuarios nao conseguem acessar o ERP.",
+                "category": "acesso",
+                "asset_name": "erp-fin-01",
+                "service_name": "erp",
+                "priority": "high",
+                "requester": {
+                    "external_id": "user-maria-santos",
+                    "display_name": "Maria Santos",
+                    "phone_number": "+5521997775269",
+                    "role": "user",
+                    "glpi_user_id": 101,
+                },
+            },
+        ).json()["ticket_id"]
+        MOCK_TICKET_STORE[ticket_id].status = "solved"
+
+        prompt_response = client.post(
+            "/api/v1/webhooks/whatsapp/messages",
+            json={
+                "sender_phone": "+5521997775269",
+                "sender_name": "Maria Santos",
+                "text": "finalizar chamado",
+                "requester_role": "user",
+            },
+        )
+        assert prompt_response.status_code == 202
+
+        response = client.post(
+            "/api/v1/webhooks/whatsapp/messages",
+            json={
+                "sender_phone": "+5521997775269",
+                "sender_name": "Maria Santos",
+                "text": "1",
+                "requester_role": "user",
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_zabbix_client, None)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["assistant_result"]["intake_stage"] == "completed"
+    assert "zabbix" in body["assistant_result"]["reply_text"].lower()
+    assert fake_zabbix.reconcile_calls
+    assert fake_zabbix.reconcile_calls[-1]["event_ids"] == ["88221"]
+    assert fake_zabbix.reconcile_calls[-1]["close_problem"] is True
 
 
 def test_supervisor_assign_command_updates_assignee() -> None:

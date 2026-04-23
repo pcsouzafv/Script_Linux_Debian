@@ -89,6 +89,157 @@ find_category_id_by_name() {
     db_query "SELECT id FROM glpi_itilcategories WHERE name = $(sql_quote "$name") LIMIT 1;"
 }
 
+find_group_id_by_name() {
+    local name="$1"
+    local parent_group_id="${2:-0}"
+    db_query "SELECT id FROM glpi_groups WHERE name = $(sql_quote "$name") AND groups_id = ${parent_group_id} LIMIT 1;"
+}
+
+find_location_id_by_name() {
+    local name="$1"
+    local parent_location_id="${2:-0}"
+    db_query "SELECT id FROM glpi_locations WHERE name = $(sql_quote "$name") AND locations_id = ${parent_location_id} LIMIT 1;"
+}
+
+ensure_group() {
+    local name="$1"
+    local parent_group_id="${2:-0}"
+    local code="${3:-}"
+    local is_assign="${4:-1}"
+    local group_id
+
+    group_id="$(find_group_id_by_name "$name" "$parent_group_id")"
+    if [[ -n "$group_id" ]]; then
+        local payload
+        payload="$(
+            jq -n \
+                --argjson id "$group_id" \
+                --arg name "$name" \
+                --arg code "$code" \
+                --argjson parent_group_id "$parent_group_id" \
+                --argjson is_assign "$is_assign" \
+                '{input:{id:$id, name:$name, code:($code | if . == "" then null else . end), groups_id:$parent_group_id, is_requester:1, is_watcher:1, is_assign:$is_assign, is_task:$is_assign, is_notify:1, is_itemgroup:1, is_usergroup:1, is_manager:1}}'
+        )"
+        glpi_api PUT "/Group/${group_id}" "$payload" >/dev/null
+        printf '%s\n' "$group_id"
+        return 0
+    fi
+
+    local payload response
+    payload="$(
+        jq -n \
+            --arg name "$name" \
+            --arg code "$code" \
+            --argjson parent_group_id "$parent_group_id" \
+            --argjson is_assign "$is_assign" \
+            '{input:{name:$name, code:($code | if . == "" then null else . end), groups_id:$parent_group_id, entities_id:0, is_recursive:1, is_requester:1, is_watcher:1, is_assign:$is_assign, is_task:$is_assign, is_notify:1, is_itemgroup:1, is_usergroup:1, is_manager:1}}'
+    )"
+    response="$(glpi_api POST '/Group/' "$payload")"
+    group_id="$(printf '%s' "$response" | jq -r '.id // empty')"
+    if [[ -z "$group_id" ]]; then
+        echo "Falha ao criar grupo ${name} no GLPI." >&2
+        printf '%s\n' "$response" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$group_id"
+}
+
+ensure_group_user_link() {
+    local user_id="$1"
+    local group_id="$2"
+    local is_manager="${3:-0}"
+    local is_userdelegate="${4:-0}"
+    local link_id
+
+    link_id="$(
+        db_query "SELECT id FROM glpi_groups_users WHERE users_id = ${user_id} AND groups_id = ${group_id} LIMIT 1;"
+    )"
+
+    local payload
+    payload="$(
+        jq -n \
+            --argjson user_id "$user_id" \
+            --argjson group_id "$group_id" \
+            --argjson is_manager "$is_manager" \
+            --argjson is_userdelegate "$is_userdelegate" \
+            '{input:{users_id:$user_id, groups_id:$group_id, is_manager:$is_manager, is_userdelegate:$is_userdelegate}}'
+    )"
+
+    if [[ -n "$link_id" ]]; then
+        payload="$(
+            jq -n \
+                --argjson id "$link_id" \
+                --argjson user_id "$user_id" \
+                --argjson group_id "$group_id" \
+                --argjson is_manager "$is_manager" \
+                --argjson is_userdelegate "$is_userdelegate" \
+                '{input:{id:$id, users_id:$user_id, groups_id:$group_id, is_manager:$is_manager, is_userdelegate:$is_userdelegate}}'
+        )"
+        glpi_api PUT "/Group_User/${link_id}" "$payload" >/dev/null
+        return 0
+    fi
+
+    glpi_api POST '/Group_User/' "$payload" >/dev/null
+}
+
+ensure_primary_group_for_user() {
+    local user_id="$1"
+    local group_id="$2"
+    local is_manager="${3:-0}"
+    local is_userdelegate="${4:-0}"
+
+    db_query "DELETE FROM glpi_groups_users WHERE users_id = ${user_id} AND groups_id <> ${group_id};" >/dev/null
+    ensure_group_user_link "$user_id" "$group_id" "$is_manager" "$is_userdelegate"
+}
+
+ensure_location() {
+    local name="$1"
+    local parent_location_id="${2:-0}"
+    local building="${3:-}"
+    local room="${4:-}"
+    local town="${5:-}"
+    local location_id
+
+    location_id="$(find_location_id_by_name "$name" "$parent_location_id")"
+    if [[ -n "$location_id" ]]; then
+        local payload
+        payload="$(
+            jq -n \
+                --argjson id "$location_id" \
+                --arg name "$name" \
+                --argjson parent_location_id "$parent_location_id" \
+                --arg building "$building" \
+                --arg room "$room" \
+                --arg town "$town" \
+                '{input:{id:$id, name:$name, locations_id:$parent_location_id, building:($building | if . == "" then null else . end), room:($room | if . == "" then null else . end), town:($town | if . == "" then null else . end)}}'
+        )"
+        glpi_api PUT "/Location/${location_id}" "$payload" >/dev/null
+        printf '%s\n' "$location_id"
+        return 0
+    fi
+
+    local payload response
+    payload="$(
+        jq -n \
+            --arg name "$name" \
+            --argjson parent_location_id "$parent_location_id" \
+            --arg building "$building" \
+            --arg room "$room" \
+            --arg town "$town" \
+            '{input:{name:$name, entities_id:0, is_recursive:1, locations_id:$parent_location_id, building:($building | if . == "" then null else . end), room:($room | if . == "" then null else . end), town:($town | if . == "" then null else . end)}}'
+    )"
+    response="$(glpi_api POST '/Location/' "$payload")"
+    location_id="$(printf '%s' "$response" | jq -r '.id // empty')"
+    if [[ -z "$location_id" ]]; then
+        echo "Falha ao criar localizacao ${name} no GLPI." >&2
+        printf '%s\n' "$response" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$location_id"
+}
+
 ensure_named_existing_user() {
     local user_id="$1"
     local firstname="$2"
@@ -205,6 +356,25 @@ ensure_asset() {
     printf '%s\n' "$item_id"
 }
 
+set_item_location() {
+    local endpoint="$1"
+    local item_id="$2"
+    local location_id="$3"
+
+    if [[ -z "$location_id" || "$location_id" == "0" ]]; then
+        return 0
+    fi
+
+    local payload
+    payload="$(
+        jq -n \
+            --argjson id "$item_id" \
+            --argjson location_id "$location_id" \
+            '{input:{id:$id, locations_id:$location_id}}'
+    )"
+    glpi_api PUT "/${endpoint}/${item_id}" "$payload" >/dev/null
+}
+
 ensure_itil_category() {
     local name="$1"
     local code="$2"
@@ -305,6 +475,64 @@ ensure_ticket() {
     printf '%s\n' "$ticket_id"
 }
 
+set_ticket_location() {
+    local ticket_id="$1"
+    local location_id="$2"
+
+    if [[ -z "$location_id" || "$location_id" == "0" ]]; then
+        return 0
+    fi
+
+    local payload
+    payload="$(
+        jq -n \
+            --argjson id "$ticket_id" \
+            --argjson location_id "$location_id" \
+            '{input:{id:$id, locations_id:$location_id}}'
+    )"
+    glpi_api PUT "/Ticket/${ticket_id}" "$payload" >/dev/null
+}
+
+ensure_ticket_group_link() {
+    local ticket_id="$1"
+    local group_id="$2"
+    local link_id
+
+    link_id="$(
+        db_query "SELECT id FROM glpi_groups_tickets WHERE tickets_id = ${ticket_id} AND type = 2 LIMIT 1;"
+    )"
+
+    if [[ -n "$link_id" ]]; then
+        local current_group_id
+        current_group_id="$(
+            db_query "SELECT groups_id FROM glpi_groups_tickets WHERE id = ${link_id} LIMIT 1;"
+        )"
+        if [[ "$current_group_id" == "$group_id" ]]; then
+            return 0
+        fi
+
+        local payload
+        payload="$(
+            jq -n \
+                --argjson id "$link_id" \
+                --argjson ticket_id "$ticket_id" \
+                --argjson group_id "$group_id" \
+                '{input:{id:$id, tickets_id:$ticket_id, groups_id:$group_id, type:2}}'
+        )"
+        glpi_api PUT "/Group_Ticket/${link_id}" "$payload" >/dev/null
+        return 0
+    fi
+
+    local payload
+    payload="$(
+        jq -n \
+            --argjson ticket_id "$ticket_id" \
+            --argjson group_id "$group_id" \
+            '{input:{tickets_id:$ticket_id, groups_id:$group_id, type:2, use_notification:1}}'
+    )"
+    glpi_api POST '/Group_Ticket/' "$payload" >/dev/null
+}
+
 ensure_ticket_item_link() {
     local ticket_id="$1"
     local item_type="$2"
@@ -351,6 +579,101 @@ ensure_ticket_followup() {
             '{input:{itemtype:"Ticket", items_id:$ticket_id, users_id:$author_id, content:$content}}'
     )"
     glpi_api POST '/ITILFollowup/' "$payload" >/dev/null
+}
+
+ensure_ticket_solution() {
+    local ticket_id="$1"
+    local author_id="$2"
+    local content="$3"
+    local existing_solution
+    local current_status
+    local reopened_for_solution=0
+
+    existing_solution="$(
+        db_query "SELECT id FROM glpi_itilsolutions WHERE itemtype = 'Ticket' AND items_id = ${ticket_id} AND content = $(sql_quote "$content") LIMIT 1;"
+    )"
+    if [[ -n "$existing_solution" ]]; then
+        return 0
+    fi
+
+    current_status="$(
+        db_query "SELECT status FROM glpi_tickets WHERE id = ${ticket_id} LIMIT 1;"
+    )"
+
+    if [[ "$current_status" == "5" || "$current_status" == "6" ]]; then
+        local reopen_payload
+        reopen_payload="$(
+            jq -n \
+                --argjson id "$ticket_id" \
+                '{input:{id:$id, status:2}}'
+        )"
+        glpi_api PUT "/Ticket/${ticket_id}" "$reopen_payload" >/dev/null
+        reopened_for_solution=1
+    fi
+
+    local payload
+    payload="$(
+        jq -n \
+            --argjson ticket_id "$ticket_id" \
+            --argjson author_id "$author_id" \
+            --arg content "$content" \
+            '{input:{itemtype:"Ticket", items_id:$ticket_id, users_id:$author_id, content:$content}}'
+    )"
+    glpi_api POST '/ITILSolution/' "$payload" >/dev/null
+
+    if [[ "$reopened_for_solution" == "1" ]]; then
+        local restore_payload
+        restore_payload="$(
+            jq -n \
+                --argjson id "$ticket_id" \
+                --argjson status "$current_status" \
+                '{input:{id:$id, status:$status}}'
+        )"
+        glpi_api PUT "/Ticket/${ticket_id}" "$restore_payload" >/dev/null
+    fi
+}
+
+ensure_ticket_task() {
+    local ticket_id="$1"
+    local technician_user_id="$2"
+    local group_id="$3"
+    local content="$4"
+    local actiontime="${5:-900}"
+    local state="${6:-2}"
+    local existing_task
+
+    existing_task="$(
+        db_query "SELECT id FROM glpi_tickettasks WHERE tickets_id = ${ticket_id} AND content = $(sql_quote "$content") LIMIT 1;"
+    )"
+    if [[ -n "$existing_task" ]]; then
+        local payload
+        payload="$(
+            jq -n \
+                --argjson id "$existing_task" \
+                --argjson ticket_id "$ticket_id" \
+                --argjson technician_user_id "$technician_user_id" \
+                --argjson group_id "$group_id" \
+                --arg content "$content" \
+                --argjson actiontime "$actiontime" \
+                --argjson state "$state" \
+                '{input:{id:$id, tickets_id:$ticket_id, content:$content, users_id_tech:$technician_user_id, groups_id_tech:$group_id, actiontime:$actiontime, state:$state}}'
+        )"
+        glpi_api PUT "/TicketTask/${existing_task}" "$payload" >/dev/null
+        return 0
+    fi
+
+    local payload
+    payload="$(
+        jq -n \
+            --argjson ticket_id "$ticket_id" \
+            --argjson technician_user_id "$technician_user_id" \
+            --argjson group_id "$group_id" \
+            --arg content "$content" \
+            --argjson actiontime "$actiontime" \
+            --argjson state "$state" \
+            '{input:{tickets_id:$ticket_id, content:$content, users_id_tech:$technician_user_id, groups_id_tech:$group_id, actiontime:$actiontime, state:$state}}'
+    )"
+    glpi_api POST '/TicketTask/' "$payload" >/dev/null
 }
 
 cleanup_legacy_ticket_duplicates() {
@@ -482,6 +805,44 @@ RAFAEL_ID="$(ensure_user "rafael.nunes" "Rafael" "Nunes" "+5511933332222")"
 PATRICIA_ID="$(ensure_user "patricia.gomes" "Patricia" "Gomes" "+5511922221111")"
 FABIO_ID="$(ensure_user "fabio.teixeira" "Fabio" "Teixeira" "+5511910101010")"
 
+TI_GROUP_ID="$(ensure_group "TI" 0 "TI" 0)"
+SERVICE_DESK_GROUP_ID="$(ensure_group "Service Desk" "$TI_GROUP_ID" "SD" 0)"
+SERVICE_DESK_N1_GROUP_ID="$(ensure_group "N1" "$SERVICE_DESK_GROUP_ID" "SD-N1" 1)"
+SERVICE_DESK_ACCESS_GROUP_ID="$(ensure_group "Acessos" "$SERVICE_DESK_GROUP_ID" "SD-ACCESS" 1)"
+INFRA_ROOT_GROUP_ID="$(ensure_group "Infraestrutura" "$TI_GROUP_ID" "INFRA" 0)"
+INFRA_N1_GROUP_ID="$(ensure_group "N1" "$INFRA_ROOT_GROUP_ID" "INFRA-N1" 1)"
+NOC_ROOT_GROUP_ID="$(ensure_group "NOC" "$TI_GROUP_ID" "NOC" 0)"
+NOC_CRITICAL_GROUP_ID="$(ensure_group "Critico" "$NOC_ROOT_GROUP_ID" "NOC-CRIT" 1)"
+
+FINANCEIRO_GROUP_ID="$(ensure_group "financeiro" 0 "FIN" 0)"
+RECEPCAO_GROUP_ID="$(ensure_group "recepcao" 0 "RECEP" 0)"
+INFRA_TEAM_GROUP_ID="$(ensure_group "infraestrutura" 0 "TEAM-INFRA" 0)"
+SERVICE_DESK_TEAM_GROUP_ID="$(ensure_group "service-desk" 0 "TEAM-SD" 0)"
+OPERACOES_GROUP_ID="$(ensure_group "operacoes" 0 "OPS" 0)"
+REDES_GROUP_ID="$(ensure_group "redes" 0 "NET" 0)"
+SEGURANCA_GROUP_ID="$(ensure_group "seguranca" 0 "SEC" 0)"
+ADMINISTRATIVO_GROUP_ID="$(ensure_group "administrativo" 0 "ADM" 0)"
+LOGISTICA_GROUP_ID="$(ensure_group "logistica" 0 "LOG" 0)"
+
+ensure_primary_group_for_user "$MARIA_ID" "$FINANCEIRO_GROUP_ID"
+ensure_primary_group_for_user "$CARLOS_ID" "$RECEPCAO_GROUP_ID"
+ensure_primary_group_for_user 4 "$INFRA_TEAM_GROUP_ID"
+ensure_primary_group_for_user 2 "$SERVICE_DESK_TEAM_GROUP_ID" 1 0
+ensure_primary_group_for_user "$BRUNO_ID" "$OPERACOES_GROUP_ID"
+ensure_primary_group_for_user "$RENATA_ID" "$REDES_GROUP_ID"
+ensure_primary_group_for_user "$LUCIANA_ID" "$FINANCEIRO_GROUP_ID"
+ensure_primary_group_for_user "$RAFAEL_ID" "$SEGURANCA_GROUP_ID"
+ensure_primary_group_for_user "$PATRICIA_ID" "$ADMINISTRATIVO_GROUP_ID"
+ensure_primary_group_for_user "$FABIO_ID" "$LOGISTICA_GROUP_ID"
+
+MATRIZ_LOCATION_ID="$(ensure_location "Matriz" 0 "Matriz" "" "Sao Paulo")"
+DATACENTER_LOCATION_ID="$(ensure_location "Datacenter" "$MATRIZ_LOCATION_ID" "Matriz" "Sala Cofre" "Sao Paulo")"
+FINANCEIRO_LOCATION_ID="$(ensure_location "Financeiro" "$MATRIZ_LOCATION_ID" "Matriz" "Financeiro" "Sao Paulo")"
+RECEPCAO_LOCATION_ID="$(ensure_location "Recepcao" "$MATRIZ_LOCATION_ID" "Matriz" "Recepcao" "Sao Paulo")"
+OPERACOES_LOCATION_ID="$(ensure_location "Operacoes" "$MATRIZ_LOCATION_ID" "Matriz" "Operacoes" "Sao Paulo")"
+SEGURANCA_LOCATION_ID="$(ensure_location "Seguranca" "$MATRIZ_LOCATION_ID" "Matriz" "Seguranca" "Sao Paulo")"
+NOC_LOCATION_ID="$(ensure_location "NOC" "$MATRIZ_LOCATION_ID" "Matriz" "NOC" "Sao Paulo")"
+
 ERP_WEB_ID="$(ensure_asset "Computer" "glpi_computers" "erp-web-01" "LAB-ERP-01" "Servidor web do ERP no laboratorio." "lab-probe-computer")"
 DB_PROD_ID="$(ensure_asset "Computer" "glpi_computers" "db-prod-01" "LAB-DB-01" "Banco de dados principal do ERP.")"
 AUTH_ID="$(ensure_asset "Computer" "glpi_computers" "auth-01" "LAB-AUTH-01" "Servidor de autenticacao corporativa.")"
@@ -489,6 +850,14 @@ PRINT_SPOOL_ID="$(ensure_asset "Computer" "glpi_computers" "print-spool-01" "LAB
 VPN_EDGE_ID="$(ensure_asset "NetworkEquipment" "glpi_networkequipments" "vpn-edge-01" "LAB-VPN-01" "Gateway VPN do laboratorio.")"
 ROUTER_EDGE_ID="$(ensure_asset "NetworkEquipment" "glpi_networkequipments" "router-edge-02" "LAB-ROUTER-02" "Roteador de borda secundario.")"
 PRINTER_ID="$(ensure_asset "Printer" "glpi_printers" "printer-matriz-01" "LAB-PRINTER-01" "Impressora principal da recepcao.")"
+
+set_item_location "Computer" "$ERP_WEB_ID" "$DATACENTER_LOCATION_ID"
+set_item_location "Computer" "$DB_PROD_ID" "$DATACENTER_LOCATION_ID"
+set_item_location "Computer" "$AUTH_ID" "$DATACENTER_LOCATION_ID"
+set_item_location "Computer" "$PRINT_SPOOL_ID" "$DATACENTER_LOCATION_ID"
+set_item_location "NetworkEquipment" "$VPN_EDGE_ID" "$NOC_LOCATION_ID"
+set_item_location "NetworkEquipment" "$ROUTER_EDGE_ID" "$NOC_LOCATION_ID"
+set_item_location "Printer" "$PRINTER_ID" "$RECEPCAO_LOCATION_ID"
 
 ACCESS_CATEGORY_ID="$(ensure_itil_category "Acesso" "ACCESS")"
 IDENTITY_CATEGORY_ID="$(ensure_itil_category "Identidade" "IDENTITY")"
@@ -565,6 +934,13 @@ PERMISSION_TICKET_ID="$(
         "$IDENTITY_CATEGORY_ID"
 )"
 
+set_ticket_location "$ERP_TICKET_ID" "$FINANCEIRO_LOCATION_ID"
+set_ticket_location "$VPN_TICKET_ID" "$OPERACOES_LOCATION_ID"
+set_ticket_location "$PRINTER_TICKET_ID" "$RECEPCAO_LOCATION_ID"
+set_ticket_location "$AUTH_TICKET_ID" "$SEGURANCA_LOCATION_ID"
+set_ticket_location "$PRINT_TICKET_ID" "$RECEPCAO_LOCATION_ID"
+set_ticket_location "$PERMISSION_TICKET_ID" "$SEGURANCA_LOCATION_ID"
+
 ensure_ticket_item_link "$ERP_TICKET_ID" "Computer" "$ERP_WEB_ID"
 ensure_ticket_item_link "$VPN_TICKET_ID" "NetworkEquipment" "$VPN_EDGE_ID"
 ensure_ticket_item_link "$PRINTER_TICKET_ID" "Printer" "$PRINTER_ID"
@@ -572,12 +948,26 @@ ensure_ticket_item_link "$AUTH_TICKET_ID" "Computer" "$AUTH_ID"
 ensure_ticket_item_link "$PRINT_TICKET_ID" "Computer" "$PRINT_SPOOL_ID"
 ensure_ticket_item_link "$PERMISSION_TICKET_ID" "Computer" "$AUTH_ID"
 
+ensure_ticket_group_link "$ERP_TICKET_ID" "$INFRA_N1_GROUP_ID"
+ensure_ticket_group_link "$VPN_TICKET_ID" "$INFRA_N1_GROUP_ID"
+ensure_ticket_group_link "$PRINTER_TICKET_ID" "$INFRA_N1_GROUP_ID"
+ensure_ticket_group_link "$AUTH_TICKET_ID" "$SERVICE_DESK_ACCESS_GROUP_ID"
+ensure_ticket_group_link "$PRINT_TICKET_ID" "$INFRA_N1_GROUP_ID"
+ensure_ticket_group_link "$PERMISSION_TICKET_ID" "$SERVICE_DESK_ACCESS_GROUP_ID"
+
 ensure_ticket_followup "$ERP_TICKET_ID" 4 "Coletando logs do host afetado e validando correlação com o Zabbix."
 ensure_ticket_followup "$VPN_TICKET_ID" 4 "Janela de observação aberta para validar perda de conectividade no gateway."
 ensure_ticket_followup "$PRINTER_TICKET_ID" 4 "Equipe verificando spool local e conectividade da impressora."
 ensure_ticket_followup "$AUTH_TICKET_ID" 4 "Aguardando evidências adicionais do usuário e revisão do serviço de autenticação."
 ensure_ticket_followup "$PRINT_TICKET_ID" 2 "Supervisor acompanhando fila de impressão e priorizando o atendimento."
 ensure_ticket_followup "$PERMISSION_TICKET_ID" 2 "Solicitação validada e encerrada com aceite do solicitante."
+
+ensure_ticket_task "$ERP_TICKET_ID" 4 "$INFRA_N1_GROUP_ID" "Executar coleta inicial de logs e validar indisponibilidade do ERP no host erp-web-01." 1800 2
+ensure_ticket_task "$VPN_TICKET_ID" 4 "$INFRA_N1_GROUP_ID" "Validar estabilidade do gateway vpn-edge-01 e evidências de perda de conectividade." 1200 2
+ensure_ticket_task "$AUTH_TICKET_ID" 4 "$SERVICE_DESK_ACCESS_GROUP_ID" "Revisar credenciais, perfil e trilha de autenticação do portal corporativo." 900 2
+ensure_ticket_task "$PRINT_TICKET_ID" 2 "$INFRA_N1_GROUP_ID" "Acompanhar fila do spooler e confirmar retomada da impressão para a recepção." 1200 2
+
+ensure_ticket_solution "$PERMISSION_TICKET_ID" 2 "Permissões revisadas no perfil corporativo e acesso validado com o solicitante."
 
 cleanup_legacy_ticket_duplicates "ERP indisponível para o financeiro" "$ERP_TICKET_ID"
 cleanup_legacy_ticket_duplicates "VPN intermitente para equipes remotas" "$VPN_TICKET_ID"
@@ -602,6 +992,9 @@ echo "Seed do GLPI concluido."
 echo "Usuarios operacionais: Ana Souza (id 4), Paula Almeida (id 2)"
 echo "Usuarios finais: Maria=${MARIA_ID}, Carlos=${CARLOS_ID}, Bruno=${BRUNO_ID}, Renata=${RENATA_ID}, Luciana=${LUCIANA_ID}, Rafael=${RAFAEL_ID}, Patricia=${PATRICIA_ID}, Fabio=${FABIO_ID}"
 echo "Categorias: acesso=${ACCESS_CATEGORY_ID}, identidade=${IDENTITY_CATEGORY_ID}, senha=${PASSWORD_CATEGORY_ID}, rede=${NETWORK_CATEGORY_ID}, servidor=${SERVER_CATEGORY_ID}, infra=${INFRA_CATEGORY_ID}"
+echo "Grupos de fila: ServiceDesk-N1=${SERVICE_DESK_N1_GROUP_ID}, ServiceDesk-Acessos=${SERVICE_DESK_ACCESS_GROUP_ID}, Infraestrutura-N1=${INFRA_N1_GROUP_ID}, NOC-Critico=${NOC_CRITICAL_GROUP_ID}"
+echo "Grupos de time: financeiro=${FINANCEIRO_GROUP_ID}, recepcao=${RECEPCAO_GROUP_ID}, infraestrutura=${INFRA_TEAM_GROUP_ID}, service-desk=${SERVICE_DESK_TEAM_GROUP_ID}"
+echo "Localizacoes: matriz=${MATRIZ_LOCATION_ID}, datacenter=${DATACENTER_LOCATION_ID}, financeiro=${FINANCEIRO_LOCATION_ID}, recepcao=${RECEPCAO_LOCATION_ID}, operacoes=${OPERACOES_LOCATION_ID}, seguranca=${SEGURANCA_LOCATION_ID}, noc=${NOC_LOCATION_ID}"
 echo "Ativos: erp-web-01=${ERP_WEB_ID}, db-prod-01=${DB_PROD_ID}, auth-01=${AUTH_ID}, print-spool-01=${PRINT_SPOOL_ID}, vpn-edge-01=${VPN_EDGE_ID}, router-edge-02=${ROUTER_EDGE_ID}, printer-matriz-01=${PRINTER_ID}"
 echo "Tickets: ERP=${ERP_TICKET_ID}, VPN=${VPN_TICKET_ID}, Printer=${PRINTER_TICKET_ID}, Auth=${AUTH_TICKET_ID}, Spool=${PRINT_TICKET_ID}, Permissao=${PERMISSION_TICKET_ID}"
 echo "Arquivo de identidades atualizado em ${IDENTITY_FILE}."

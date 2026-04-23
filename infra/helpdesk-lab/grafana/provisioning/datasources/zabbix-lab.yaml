@@ -1,0 +1,41 @@
+apiVersion: 1
+
+datasources:
+  - name: Zabbix API
+    uid: zabbix-api
+    type: alexanderzobnin-zabbix-datasource
+    access: proxy
+    url: $GRAFANA_ZABBIX_API_URL
+    editable: false
+    jsonData:
+      authType: userLogin
+      username: $GRAFANA_ZABBIX_API_USERNAME
+      trends: true
+      trendsFrom: 7d
+      trendsRange: 4d
+      cacheTTL: 1h
+      timeout: 30
+      queryTimeout: 60
+      dbConnectionEnable: true
+      dbConnectionDatasourceName: Zabbix DB
+      dbConnectionRetentionPolicy: ""
+      disableReadOnlyUsersAck: true
+      disableDataAlignment: false
+    secureJsonData:
+      password: $GRAFANA_ZABBIX_API_PASSWORD
+
+  - name: Zabbix DB
+    uid: zabbix-db
+    type: mysql
+    access: proxy
+    url: db:3306
+    user: $GRAFANA_ZABBIX_DB_USER
+    editable: false
+    jsonData:
+      database: $GRAFANA_ZABBIX_DB_NAME
+      maxOpenConns: 20
+      maxIdleConns: 10
+      maxIdleConnsAuto: true
+      connMaxLifetime: 14400
+    secureJsonData:
+      password: $GRAFANA_ZABBIX_DB_PASSWORD

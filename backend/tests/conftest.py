@@ -1,6 +1,7 @@
 import pytest
 
 from app.core.config import get_settings
+from app.orchestration.helpdesk import clear_processed_whatsapp_message_ids
 from app.services.glpi import MOCK_TICKET_STORE
 from app.services.intake import clear_user_intake_sessions
 from app.services.job_queue import clear_memory_job_queue
@@ -29,6 +30,7 @@ def isolate_test_settings() -> None:
         "glpi_user_token": settings.glpi_user_token,
         "glpi_username": settings.glpi_username,
         "glpi_password": settings.glpi_password,
+        "glpi_queue_group_map": settings.glpi_queue_group_map,
         "zabbix_base_url": settings.zabbix_base_url,
         "zabbix_api_token": settings.zabbix_api_token,
         "zabbix_username": settings.zabbix_username,
@@ -82,6 +84,7 @@ def isolate_test_settings() -> None:
     settings.glpi_user_token = None
     settings.glpi_username = None
     settings.glpi_password = None
+    settings.glpi_queue_group_map = {}
     settings.zabbix_base_url = None
     settings.zabbix_api_token = None
     settings.zabbix_username = None
@@ -120,6 +123,7 @@ def isolate_test_settings() -> None:
     clear_memory_operational_state()
     clear_memory_job_queue()
     clear_memory_ticket_analytics()
+    clear_processed_whatsapp_message_ids()
     MOCK_TICKET_STORE.clear()
 
     yield
@@ -128,6 +132,7 @@ def isolate_test_settings() -> None:
     clear_memory_operational_state()
     clear_memory_job_queue()
     clear_memory_ticket_analytics()
+    clear_processed_whatsapp_message_ids()
     MOCK_TICKET_STORE.clear()
     for key, value in original_values.items():
         setattr(settings, key, value)
