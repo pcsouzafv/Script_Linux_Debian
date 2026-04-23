@@ -1,5 +1,6 @@
 from fastapi import Depends
 
+from app.agent_runtime import AgentRuntimeService
 from app.core.config import Settings, get_settings
 from app.orchestration.helpdesk import HelpdeskOrchestrator
 from app.services.automation import AutomationService
@@ -114,4 +115,14 @@ def get_helpdesk_orchestrator(
         operational_store=operational_store,
         analytics_store=analytics_store,
         job_queue=job_queue,
+    )
+
+
+def get_agent_runtime_service(
+    settings: Settings = Depends(get_settings),
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> AgentRuntimeService:
+    return AgentRuntimeService(
+        settings=settings,
+        orchestrator=orchestrator,
     )

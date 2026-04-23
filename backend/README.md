@@ -15,6 +15,7 @@ Nesta fase o backend entrega:
 - Endpoint para ingestão normalizada de mensagem do WhatsApp, com separação entre abertura de chamado e comando operacional para técnico.
 - Fluxo de WhatsApp sensível ao papel do remetente: usuário final abre chamado por texto livre; técnico, supervisor e admin entram em fluxo operacional assistido e usam `/open` quando quiserem abrir chamado explicitamente.
 - Endpoint para correlação simples com eventos do Zabbix.
+- Endpoint interno de investigação assistida em LangGraph, operando em `shadow/read-only`, para reunir contexto real de GLPI, Zabbix, auditoria, incidentes parecidos, runbooks do repositório e memória operacional própria do agente sem executar mudanças.
 - Endpoint para inspecionar o status da camada de IA do bot e o provider ativo.
 - Modo local sem integrações configuradas, retornando respostas mock úteis para desenvolvimento.
 
@@ -77,6 +78,8 @@ A rota administrativa `GET /api/v1/helpdesk/audit/events` usa credencial separad
 A rota administrativa `POST /api/v1/helpdesk/automation/jobs` usa um terceiro escopo dedicado, enviado em `X-Helpdesk-Automation-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_AUTOMATION_ACCESS_TOKEN`; sem isso, o backend bloqueia a criacao de jobs administrativos.
 
 As rotas administrativas de leitura `GET /api/v1/helpdesk/automation/jobs`, `GET /api/v1/helpdesk/automation/jobs/{job_id}` e `GET /api/v1/helpdesk/automation/summary` aceitam um escopo proprio em `X-Helpdesk-Automation-Read-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_AUTOMATION_READ_ACCESS_TOKEN` para separar leitura de escrita; se ele nao estiver definido, o backend faz fallback controlado para `HELPDESK_AUTOMATION_ACCESS_TOKEN`.
+
+A rota `POST /api/v1/helpdesk/agent/investigate` usa esse mesmo escopo de leitura administrativa. Ela executa um grafo LangGraph em modo `shadow`, sem abrir jobs, sem rodar automacoes e sem alterar GLPI ou Zabbix. O fluxo atual consulta ticket, auditoria, correlacao com Zabbix, catalogo homologado, incidentes parecidos do historico analitico, documentos operacionais locais e memorias duraveis do proprio agente por classe de incidente. Quando `HELPDESK_OPERATIONAL_POSTGRES_DSN` estiver configurado, os checkpoints do grafo e a memoria operacional do agente passam a usar PostgreSQL; sem isso, o runtime usa fallback em memoria local.
 
 As rotas de aprovacao `POST /api/v1/helpdesk/automation/jobs/{job_id}/approve`, `POST /api/v1/helpdesk/automation/jobs/{job_id}/reject` e `POST /api/v1/helpdesk/automation/jobs/{job_id}/cancel` usam um quarto escopo separado, enviado em `X-Helpdesk-Automation-Approval-Key` ou `Authorization: Bearer <token>`. Configure `HELPDESK_AUTOMATION_APPROVAL_ACCESS_TOKEN`; sem isso, o backend bloqueia decisoes de aprovacao, rejeicao e cancelamento.
 

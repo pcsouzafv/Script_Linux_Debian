@@ -1,6 +1,7 @@
 import pytest
 
 from app.core.config import get_settings
+from app.agent_runtime import clear_agent_memory_store, clear_agent_runtime_memory
 from app.orchestration.helpdesk import clear_processed_whatsapp_message_ids
 from app.services.glpi import MOCK_TICKET_STORE
 from app.services.intake import clear_user_intake_sessions
@@ -123,6 +124,8 @@ def isolate_test_settings() -> None:
     clear_memory_operational_state()
     clear_memory_job_queue()
     clear_memory_ticket_analytics()
+    clear_agent_memory_store()
+    clear_agent_runtime_memory()
     clear_processed_whatsapp_message_ids()
     MOCK_TICKET_STORE.clear()
 
@@ -132,6 +135,8 @@ def isolate_test_settings() -> None:
     clear_memory_operational_state()
     clear_memory_job_queue()
     clear_memory_ticket_analytics()
+    clear_agent_memory_store()
+    clear_agent_runtime_memory()
     clear_processed_whatsapp_message_ids()
     MOCK_TICKET_STORE.clear()
     for key, value in original_values.items():

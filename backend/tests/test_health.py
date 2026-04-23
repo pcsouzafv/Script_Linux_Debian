@@ -456,6 +456,283 @@ def test_runtime_overview_route_returns_sessions_audit_and_operational_summaries
     assert body["automation"]["total_jobs"] == 1
 
 
+def test_agent_investigation_route_returns_shadow_analysis_for_ticket() -> None:
+    class FakeZabbixClient:
+        async def find_related_events(
+            self,
+            asset_name: str | None,
+            service_name: str | None,
+            limit: int = 5,
+        ):
+            return [
+                CorrelatedEvent(
+                    source="zabbix",
+                    event_id="77123",
+                    severity="4",
+                    summary="Banco primario com indisponibilidade intermitente",
+                    host=asset_name or "db-prod-01",
+                )
+            ], "live", ["Correlacao fake do Zabbix para investigacao shadow."]
+
+    app.dependency_overrides[get_zabbix_client] = lambda: FakeZabbixClient()
+
+    try:
+        create_payload = {
+            "subject": "Banco principal sem resposta",
+            "description": "Usuarios do ERP nao conseguem consultar dados no banco principal.",
+            "category": "infra",
+            "asset_name": "db-prod-01",
+            "service_name": "postgresql",
+            "priority": "high",
+            "requester": {
+                "external_id": "user-db-01",
+                "display_name": "Patricia Ramos",
+                "phone_number": "+5511999998888",
+                "role": "user",
+            },
+        }
+        ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=create_payload).json()["ticket_id"]
+        response = client.post(
+            "/api/v1/helpdesk/agent/investigate",
+            headers=AUTOMATION_READ_HEADERS,
+            json={"ticket_id": ticket_id},
+        )
+    finally:
+        app.dependency_overrides.pop(get_zabbix_client, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "shadow"
+    assert body["checkpoint_mode"] == "memory"
+    assert body["thread_id"] == f"agent:ticket:{ticket_id}"
+    assert body["ticket_id"] == ticket_id
+    assert body["policy"]["mode"] == "shadow-read-only"
+    assert body["policy"]["can_read_data"] is True
+    assert body["policy"]["can_execute_write_actions"] is False
+    assert "glpi.ticket_snapshot" in body["candidate_automations"]
+    assert "ansible.ticket_context_probe" in body["candidate_automations"]
+    assert "glpi_get_ticket_context" in body["used_tools"]
+    assert "helpdesk_get_resolution_advice" in body["used_tools"]
+    assert "ops_list_ticket_audit_events" in body["used_tools"]
+    assert "zabbix_find_related_events" in body["used_tools"]
+    assert "automation_list_catalog" in body["used_tools"]
+    assert len(body["correlated_events"]) == 1
+    assert body["correlated_events"][0]["event_id"] == "77123"
+    assert body["evidence"]
+    assert body["recommended_actions"]
+    assert any(
+        event.event_type == "agent_investigation_completed" and event.ticket_id == ticket_id
+        for event in get_memory_audit_events()
+    )
+
+
+def test_agent_investigation_route_persists_thread_history_in_memory() -> None:
+    create_payload = {
+        "subject": "VPN da operacao sem estabilidade",
+        "description": "Conexao do site cai varias vezes durante o turno.",
+        "category": "rede",
+        "asset_name": "vpn-edge-01",
+        "service_name": "vpn",
+        "priority": "medium",
+        "requester": {
+            "external_id": "user-vpn-01",
+            "display_name": "Marcos Silva",
+            "phone_number": "+5511988887777",
+            "role": "user",
+        },
+    }
+    ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=create_payload).json()["ticket_id"]
+
+    first_response = client.post(
+        "/api/v1/helpdesk/agent/investigate",
+        headers=AUTOMATION_READ_HEADERS,
+        json={
+            "ticket_id": ticket_id,
+            "thread_id": "agent:test-thread-01",
+        },
+    )
+    second_response = client.post(
+        "/api/v1/helpdesk/agent/investigate",
+        headers=AUTOMATION_READ_HEADERS,
+        json={
+            "ticket_id": ticket_id,
+            "thread_id": "agent:test-thread-01",
+        },
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert first_response.json()["thread_id"] == "agent:test-thread-01"
+    assert second_response.json()["thread_id"] == "agent:test-thread-01"
+    assert second_response.json()["checkpoint_history_count"] > first_response.json()["checkpoint_history_count"]
+
+
+def test_agent_investigation_route_validates_scope() -> None:
+    response = client.post(
+        "/api/v1/helpdesk/agent/investigate",
+        headers=AUTOMATION_READ_HEADERS,
+        json={},
+    )
+
+    assert response.status_code == 422
+    assert "ticket_id" in response.text or "asset_name" in response.text or "service_name" in response.text
+
+
+def test_agent_investigation_route_returns_knowledge_hits_from_history_and_docs() -> None:
+    store = TicketAnalyticsStore(get_settings())
+    now = datetime.now(timezone.utc)
+
+    historical_payload = {
+        "subject": "Falha anterior de conectividade com Zabbix",
+        "description": "Backend perdeu conectividade com a API do Zabbix durante a correlacao.",
+        "category": "infra",
+        "asset_name": "zbx-api-01",
+        "service_name": "zabbix",
+        "priority": "high",
+        "requester": {
+            "external_id": "user-zbx-old",
+            "display_name": "Helena Costa",
+            "phone_number": "+5511970001111",
+            "role": "user",
+        },
+    }
+    historical_ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=historical_payload).json()["ticket_id"]
+    MOCK_TICKET_STORE[historical_ticket_id].status = "solved"
+    MOCK_TICKET_STORE[historical_ticket_id].updated_at = now.isoformat()
+    MOCK_TICKET_STORE[historical_ticket_id].solutions.append(
+        {
+            "content": "Validar conectividade da API do Zabbix e revisar token antes de escalar.",
+            "date_creation": now.isoformat(),
+            "users_id": 501,
+        }
+    )
+    asyncio.run(
+        store.upsert_snapshot(
+            TicketAnalyticsSnapshotRecord(
+                ticket_id=historical_ticket_id,
+                subject=historical_payload["subject"],
+                description=historical_payload["description"],
+                status="solved",
+                priority="high",
+                requester_glpi_user_id=None,
+                assigned_glpi_user_id=501,
+                external_id=f"helpdesk-api-{historical_ticket_id}",
+                request_type_id=1,
+                request_type_name="Direct",
+                category_id=1,
+                category_name="Infra",
+                asset_name="zbx-api-01",
+                service_name="zabbix",
+                source_channel="api",
+                routed_to="Infraestrutura-N1",
+                correlation_event_count=1,
+                source_updated_at=now,
+            )
+        )
+    )
+
+    current_payload = {
+        "subject": "Falha de conectividade com Zabbix no backend",
+        "description": "Backend sem conectividade com a API do Zabbix para correlacao operacional.",
+        "category": "infra",
+        "asset_name": "zbx-api-02",
+        "service_name": "zabbix",
+        "priority": "high",
+        "requester": {
+            "external_id": "user-zbx-new",
+            "display_name": "Rafael Prado",
+            "phone_number": "+5511970002222",
+            "role": "user",
+        },
+    }
+    current_ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=current_payload).json()["ticket_id"]
+
+    response = client.post(
+        "/api/v1/helpdesk/agent/investigate",
+        headers=AUTOMATION_READ_HEADERS,
+        json={"ticket_id": current_ticket_id},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    kinds = {hit["kind"] for hit in body["knowledge_hits"]}
+    assert "similar_incident" in kinds
+    assert "runbook" in kinds
+    assert any(
+        hit["reference"] == f"ticket:{historical_ticket_id}"
+        for hit in body["knowledge_hits"]
+        if hit["kind"] == "similar_incident"
+    )
+    assert any(
+        hit["reference"].endswith(".md")
+        for hit in body["knowledge_hits"]
+        if hit["kind"] == "runbook"
+    )
+    assert "knowledge_find_similar_incidents" in body["used_tools"]
+    assert "knowledge_find_runbooks" in body["used_tools"]
+
+
+def test_agent_investigation_route_reuses_operational_memory_between_incidents() -> None:
+    first_payload = {
+        "subject": "Falha de conectividade com Zabbix no backend primario",
+        "description": "Backend sem conectividade com a API do Zabbix durante a correlacao operacional.",
+        "category": "infra",
+        "asset_name": "zbx-api-11",
+        "service_name": "zabbix",
+        "priority": "high",
+        "requester": {
+            "external_id": "user-memory-01",
+            "display_name": "Talita Gomes",
+            "phone_number": "+5511970003333",
+            "role": "user",
+        },
+    }
+    second_payload = {
+        "subject": "Falha de conectividade com Zabbix no backend secundario",
+        "description": "Backend sem conectividade com a API do Zabbix ao consultar eventos.",
+        "category": "infra",
+        "asset_name": "zbx-api-12",
+        "service_name": "zabbix",
+        "priority": "high",
+        "requester": {
+            "external_id": "user-memory-02",
+            "display_name": "Diego Martins",
+            "phone_number": "+5511970004444",
+            "role": "user",
+        },
+    }
+
+    first_ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=first_payload).json()["ticket_id"]
+    first_investigation = client.post(
+        "/api/v1/helpdesk/agent/investigate",
+        headers=AUTOMATION_READ_HEADERS,
+        json={"ticket_id": first_ticket_id},
+    )
+    second_ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=second_payload).json()["ticket_id"]
+    second_investigation = client.post(
+        "/api/v1/helpdesk/agent/investigate",
+        headers=AUTOMATION_READ_HEADERS,
+        json={"ticket_id": second_ticket_id},
+    )
+
+    assert first_investigation.status_code == 200
+    assert second_investigation.status_code == 200
+    first_body = first_investigation.json()
+    second_body = second_investigation.json()
+    assert first_body["memory_hits"] == []
+    assert second_body["memory_hits"]
+    assert "memory_find_operational_patterns" in second_body["used_tools"]
+    assert any(
+        hit["source_ticket_id"] == first_ticket_id
+        for hit in second_body["memory_hits"]
+    )
+    assert any(
+        "incident:infra:zabbix" == hit["namespace"]
+        for hit in second_body["memory_hits"]
+    )
+    assert "memoria operacional do agente" in second_body["summary"].lower()
+
+
 def test_ops_dashboard_page_is_available_for_browser_access() -> None:
     response = client.get("/ops")
 

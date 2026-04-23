@@ -8,6 +8,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.core.config import Settings, get_settings
 from app.core.dependencies import (
+    get_agent_runtime_service,
     get_docker_runtime_client,
     get_helpdesk_orchestrator,
     get_llm_client,
@@ -22,6 +23,8 @@ from app.core.security import (
 )
 from app.orchestration.helpdesk import HelpdeskOrchestrator
 from app.schemas.helpdesk import (
+    AgentInvestigationRequest,
+    AgentInvestigationResponse,
     AutomationJobCreateRequest,
     AutomationJobDecisionRequest,
     AutomationJobListResponse,
@@ -58,6 +61,7 @@ from app.schemas.helpdesk import (
     WhatsAppInteractionResponse,
     WhatsAppWebhookProcessingResponse,
 )
+from app.agent_runtime import AgentRuntimeService
 from app.services.ansible_runner import ansible_runner_module
 from app.services.docker_runtime import DockerRuntimeClient
 from app.services.llm import LLMClient
@@ -224,6 +228,18 @@ async def get_runtime_overview(
         ticket_operations=ticket_summary,
         automation=automation_summary,
     )
+
+
+@router.post(
+    "/helpdesk/agent/investigate",
+    response_model=AgentInvestigationResponse,
+    dependencies=automation_read_dependencies,
+)
+async def investigate_with_agent_runtime(
+    payload: AgentInvestigationRequest,
+    agent_runtime_service: AgentRuntimeService = Depends(get_agent_runtime_service),
+) -> AgentInvestigationResponse:
+    return await agent_runtime_service.investigate(payload)
 
 
 @router.post(

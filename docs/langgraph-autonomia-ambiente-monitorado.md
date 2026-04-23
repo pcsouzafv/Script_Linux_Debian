@@ -29,6 +29,26 @@ Conclusao pratica:
 - ainda nao esta pronto para `autonomia restrita` em producao;
 - ainda esta longe de `autonomia ampla` para remediacao livre.
 
+### Atualizacao de implementacao em abril de 2026
+
+Desde a versao inicial deste estudo, a fundacao do runtime ja deixou de ser apenas proposta e passou a existir no backend.
+
+Ja foi implementado:
+
+- dependencias `langchain`, `langgraph`, `langgraph-checkpoint-postgres` e `psycopg` no `backend/pyproject.toml`;
+- pacote `backend/app/agent_runtime/` com `state.py`, `graph.py`, `policies.py`, `tools/read_only.py`, `knowledge.py` e `memory_store.py`;
+- endpoint interno `POST /api/v1/helpdesk/agent/investigate`, protegido pelo escopo de leitura administrativa;
+- runtime `shadow/read-only` com `StateGraph` explicito, `thread_id` estavel, `checkpoint` em memoria e suporte a PostgreSQL quando configurado;
+- tools read-only para ticket, auditoria, correlacao com Zabbix, catalogo homologado, historico semelhante, runbooks locais e memoria operacional do agente;
+- memoria operacional propria do agente, separada do GLPI, com namespace por classe de incidente e servico;
+- testes cobrindo investigacao, `checkpoint history`, recuperacao de conhecimento e reuso de memoria entre incidentes parecidos.
+
+Em outras palavras:
+
+- a Fase A ja esta funcional;
+- a Fase B comecou de forma heuristica e auditavel;
+- o principal gap agora nao e mais "ter ou nao ter runtime", e sim amadurecer retrieval, aprovacao por politica e execucao homologada.
+
 ## O que "autonomo" significa neste projeto
 
 ### Nivel 0: assistencia
@@ -83,6 +103,11 @@ O projeto ja tem blocos importantes que ajudam muito:
 - worker seguro de automacao em `backend/app/workers/automation_worker.py`;
 - catalogo inicial de automacoes homologadas em `backend/app/services/automation.py`;
 - snapshot analitico de tickets e historico operacional em `backend/app/services/ticket_analytics_store.py` e `backend/app/services/glpi_analytics.py`;
+- runtime inicial do agente em `backend/app/agent_runtime/graph.py`, com fluxo explicito de investigacao;
+- tools read-only do runtime em `backend/app/agent_runtime/tools/read_only.py`;
+- recuperacao de conhecimento local em `backend/app/agent_runtime/knowledge.py`;
+- memoria operacional duravel do agente em `backend/app/agent_runtime/memory_store.py`;
+- endpoint interno para investigacao assistida em `backend/app/api/routes/helpdesk.py`;
 - base documental ja alinhada para manter `LangChain` ou `LangGraph` acima da camada transacional do backend.
 
 ### O que isso significa na pratica
@@ -94,17 +119,17 @@ O projeto ja sabe:
 - manter trilha de auditoria;
 - aprovar ou rejeitar automacoes por risco;
 - executar um conjunto muito pequeno de runbooks homologados;
-- sugerir resolucao segura com base em historico e heuristica.
+- sugerir resolucao segura com base em historico e heuristica;
+- investigar incidente com `LangGraph` sem executar mudanca;
+- recuperar incidentes parecidos, runbooks locais e memoria operacional do proprio agente;
+- manter `checkpoint` do fluxo de investigacao com fallback em memoria e suporte a PostgreSQL.
 
 ### O que ainda nao existe
 
 Ainda faltam os blocos que tornam um agente realmente operacional:
 
-- runtime em grafo com passos explicitos, pausas e retomada;
-- persistencia nativa do estado do agente por `thread_id`;
-- memoria de longo prazo nativa do agente;
 - camada real de `RAG` com indice vetorial;
-- tool registry tipado para observabilidade, diagnostico, remediacao e governance;
+- tool registry mais amplo para observabilidade, diagnostico, remediacao e governance;
 - politicas de autonomia por risco, confianca, janela e criticidade;
 - avaliacao offline e online do comportamento do agente;
 - observabilidade profunda do proprio agente;
@@ -657,17 +682,22 @@ Ou seja: nao e refazer a plataforma. E adicionar uma camada de runtime autonomo 
 
 ## 14. Dependencias tecnicas que faltam
 
-No estado atual de `backend/pyproject.toml`, ainda nao aparecem dependencias da stack de agentes.
+O baseline da stack de agentes ja entrou no `backend/pyproject.toml`.
 
-O conjunto minimo esperado para a proxima fase deve incluir algo nesta linha:
+Ja presentes:
 
 - `langchain`
 - `langgraph`
 - `langgraph-checkpoint-postgres`
-- pacote do provider escolhido para uso via LangChain
-- suporte a embeddings
-- suporte ao indice vetorial, preferencialmente `pgvector`
-- `langsmith` para tracing e avaliacao
+- `psycopg` com suporte a `binary` e `pool`
+
+O conjunto que ainda falta para as proximas fases inclui algo nesta linha:
+
+- pacote do provider escolhido para uso via LangChain de forma nativa;
+- suporte a embeddings;
+- suporte ao indice vetorial, preferencialmente `pgvector`;
+- `langsmith` para tracing e avaliacao estruturada;
+- biblioteca de reranking ou filtros de retrieval quando o volume documental crescer.
 
 Observacao importante:
 
@@ -679,18 +709,18 @@ Observacao importante:
 | Capacidade | Estado atual | Leitura pratica |
 | --- | --- | --- |
 | Integracao GLPI | boa | pronta para virar tool segura |
-| Integracao Zabbix | inicial | precisa ampliar cobertura de leitura e correlacao |
+| Integracao Zabbix | parcial | leitura basica e correlacao ja existem, mas ainda faltam manutencao, dependencia e topologia |
 | Worker e fila | boa | ja ajuda a sustentar remediacao controlada |
 | Politica de aprovacao | parcial | existe por automacao, falta por tipo de incidente e confianca |
 | LLM basico | parcial | suficiente para assistencia, nao para runtime autonomo |
-| Runtime em grafo | ausente | precisa ser criado com `LangGraph` |
-| Checkpoint duravel do agente | ausente | precisa usar persistencia nativa |
-| Memoria de longo prazo | ausente | precisa de store e indexacao |
-| RAG | ausente | hoje e um dos maiores gaps |
+| Runtime em grafo | inicial | investigacao `shadow/read-only` ja roda com `LangGraph` |
+| Checkpoint duravel do agente | parcial | suporte a PostgreSQL existe, mas ainda precisa validacao ampla em ambiente real |
+| Memoria de longo prazo | inicial | store proprio do agente ja existe, mas ainda sem politica madura de consolidacao |
+| RAG | inicial | retrieval local e heuristico ja existe, mas sem embeddings nem indice vetorial |
 | Catalogo de remediacao | inicial | muito pequeno para incidentes reais |
 | Rollback padronizado | ausente | hoje ainda e manual ou implicito |
 | Avaliacao do agente | ausente | precisa nascer junto com o runtime |
-| Observabilidade do agente | ausente | precisa de tracing, metricas e scorecards |
+| Observabilidade do agente | inicial | auditoria existe, mas ainda faltam tracing, metricas e scorecards |
 | Correlacao de incidentes em massa | parcial | heuristica existe, mas ainda e curta |
 
 ## 16. Roadmap recomendado
@@ -709,6 +739,11 @@ Criterio de saida:
 
 - agente consegue investigar incidente sem executar mudanca.
 
+Status atual:
+
+- fase funcionalmente entregue;
+- ainda falta tracing estruturado e validacao mais ampla do `checkpoint` em PostgreSQL fora do laboratorio.
+
 ### Fase B: conhecimento e retrieval
 
 Entregas:
@@ -721,6 +756,12 @@ Entregas:
 Criterio de saida:
 
 - agente recupera conhecimento confiavel e explica de onde tirou a recomendacao.
+
+Status atual:
+
+- fase iniciada;
+- ja existe retrieval heuristico de documentos locais, incidentes parecidos e memoria operacional propria;
+- ainda faltam embeddings, indice vetorial, reranking e filtros por ambiente/empresa.
 
 ### Fase C: semi-autonomia operacional
 
@@ -735,6 +776,10 @@ Entregas:
 Criterio de saida:
 
 - agente executa coleta e remediacao simples com governanca.
+
+Proximo melhor passo realista:
+
+- ligar o runtime atual ao fluxo de aprovacao administrativa ja existente, para o agente propor uma automacao homologada com justificativa e politica antes de qualquer execucao.
 
 ### Fase D: autonomia restrita
 

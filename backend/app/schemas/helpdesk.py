@@ -2,7 +2,7 @@ import re
 from enum import StrEnum
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 
 OPERATOR_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{1,119}$")
@@ -79,6 +79,117 @@ class CorrelationRequest(BaseModel):
 class CorrelationResponse(BaseModel):
     mode: str
     events: list[CorrelatedEvent] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class AgentInvestigationRequest(BaseModel):
+    ticket_id: str | None = Field(default=None, min_length=1, max_length=120)
+    asset_name: str | None = Field(default=None, max_length=120)
+    service_name: str | None = Field(default=None, max_length=120)
+    thread_id: str | None = Field(default=None, min_length=2, max_length=120)
+    requested_by: str | None = Field(default="agent-shadow", min_length=2, max_length=120)
+
+    @field_validator("ticket_id", "asset_name", "service_name", "thread_id", mode="before")
+    @classmethod
+    def normalize_optional_fields(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @field_validator("requested_by")
+    @classmethod
+    def validate_requested_by(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_operator_identifier(value, "requested_by")
+
+    @field_validator("thread_id")
+    @classmethod
+    def validate_thread_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_operator_identifier(value, "thread_id")
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "AgentInvestigationRequest":
+        if not (self.ticket_id or self.asset_name or self.service_name):
+            raise ValueError(
+                "Informe pelo menos ticket_id, asset_name ou service_name para a investigacao."
+            )
+        return self
+
+
+class AgentInvestigationPolicyResponse(BaseModel):
+    mode: str
+    can_read_data: bool
+    can_execute_write_actions: bool
+    approval_required_for_write: bool
+    rationale: str
+    notes: list[str] = Field(default_factory=list)
+
+
+class AgentInvestigationEvidenceResponse(BaseModel):
+    source: str
+    kind: str
+    title: str
+    detail: str | None = None
+    severity: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentInvestigationKnowledgeHitResponse(BaseModel):
+    kind: str
+    source: str
+    title: str
+    snippet: str
+    reference: str
+    score: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentInvestigationMemoryHitResponse(BaseModel):
+    namespace: str
+    memory_key: str
+    title: str
+    summary: str
+    hypothesis: str | None = None
+    category_name: str | None = None
+    service_name: str | None = None
+    asset_name: str | None = None
+    source_ticket_id: str | None = None
+    recommended_actions: list[str] = Field(default_factory=list)
+    references_json: list[dict[str, Any]] = Field(default_factory=list)
+    usage_count: int = 0
+    score: int = 0
+    updated_at: str
+
+
+class AgentInvestigationResponse(BaseModel):
+    mode: str
+    thread_id: str
+    checkpoint_mode: str
+    checkpoint_history_count: int = 0
+    ticket_id: str | None = None
+    subject: str | None = None
+    ticket_status: str | None = None
+    priority: str | None = None
+    category_name: str | None = None
+    asset_name: str | None = None
+    service_name: str | None = None
+    routed_to: str | None = None
+    source_channel: str | None = None
+    summary: str
+    hypothesis: str | None = None
+    recommended_actions: list[str] = Field(default_factory=list)
+    candidate_automations: list[str] = Field(default_factory=list)
+    correlated_events: list[CorrelatedEvent] = Field(default_factory=list)
+    knowledge_hits: list[AgentInvestigationKnowledgeHitResponse] = Field(default_factory=list)
+    memory_hits: list[AgentInvestigationMemoryHitResponse] = Field(default_factory=list)
+    used_tools: list[str] = Field(default_factory=list)
+    available_tools: list[str] = Field(default_factory=list)
+    policy: AgentInvestigationPolicyResponse
+    evidence: list[AgentInvestigationEvidenceResponse] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
