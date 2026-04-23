@@ -1,4 +1,4 @@
-# Script_Linux_Debian
+# ITSM GLPI Automação de atendimento Infraestrutura e Monitoramento com Inteligência Artificial 
 
 Plataforma base para automação de infraestrutura, servicedesk e atendimento inteligente com integração entre GLPI, Zabbix, WhatsApp e agentes baseados em LangChain.
 
