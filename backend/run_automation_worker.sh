@@ -46,3 +46,5 @@ fi
 
 cd "$SCRIPT_DIR"
 exec "$VENV_PYTHON" -m app.workers.automation_worker "$@"
+cd "$SCRIPT_DIR"
+exec "$VENV_PYTHON" -m app.workers.automation_worker
