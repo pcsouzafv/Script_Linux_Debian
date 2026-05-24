@@ -3,7 +3,9 @@ import json
 
 def build_runtime_dashboard_html(*, api_prefix: str) -> str:
     overview_path = f"{api_prefix}/helpdesk/runtime/overview"
+    agent_path = f"{api_prefix}/helpdesk/agent/investigate"
     overview_path_json = json.dumps(overview_path)
+    agent_path_json = json.dumps(agent_path)
     template = """<!doctype html>
 <html lang="pt-BR">
   <head>
@@ -362,6 +364,41 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
         </article>
 
         <article class="panel span-12">
+          <h2>Agente LangGraph</h2>
+          <div class="muted">Investigacao shadow/read-only com GLPI, Zabbix, auditoria, conhecimento local e memoria operacional.</div>
+          <div class="controls">
+            <div class="field">
+              <label for="agent-ticket-id">Ticket</label>
+              <input id="agent-ticket-id" type="text" placeholder="Opcional" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="agent-service-name">Servico</label>
+              <input id="agent-service-name" type="text" placeholder="zabbix, erp, vpn..." autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="agent-asset-name">Ativo</label>
+              <input id="agent-asset-name" type="text" placeholder="host, container, API..." autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="agent-requested-by">Solicitante</label>
+              <input id="agent-requested-by" type="text" value="ops-dashboard" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="agent-thread-id">Thread</label>
+              <input id="agent-thread-id" type="text" placeholder="Opcional" autocomplete="off" />
+            </div>
+            <div class="actions">
+              <button id="agent-button" class="primary" type="button">Investigar</button>
+            </div>
+          </div>
+          <div class="meta">
+            <span>Endpoint: <span class="mono" id="agent-endpoint-label"></span></span>
+            <span id="agent-status">Aguardando investigacao.</span>
+          </div>
+          <div id="agent-result"></div>
+        </article>
+
+        <article class="panel span-12">
           <h2>Containers Docker</h2>
           <div class="muted" id="docker-summary">Sem leitura dos containers.</div>
           <div id="docker-apps-table"></div>
@@ -384,13 +421,17 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
 
     <script>
       const OVERVIEW_PATH = __OVERVIEW_PATH__;
+      const AGENT_PATH = __AGENT_PATH__;
       const endpointLabel = document.getElementById("endpoint-label");
+      const agentEndpointLabel = document.getElementById("agent-endpoint-label");
       const auditTokenInput = document.getElementById("audit-token");
       const automationTokenInput = document.getElementById("automation-token");
       const refreshInput = document.getElementById("refresh-ms");
       const loadButton = document.getElementById("load-button");
       const toggleButton = document.getElementById("toggle-button");
+      const agentButton = document.getElementById("agent-button");
       const requestStatus = document.getElementById("request-status");
+      const agentStatus = document.getElementById("agent-status");
       const lastUpdated = document.getElementById("last-updated");
       const healthList = document.getElementById("health-list");
       const integrationList = document.getElementById("integration-list");
@@ -410,8 +451,15 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
       const auditSummary = document.getElementById("audit-summary");
       const healthPill = document.getElementById("health-pill");
       const messagingPill = document.getElementById("messaging-pill");
+      const agentResult = document.getElementById("agent-result");
+      const agentTicketIdInput = document.getElementById("agent-ticket-id");
+      const agentServiceNameInput = document.getElementById("agent-service-name");
+      const agentAssetNameInput = document.getElementById("agent-asset-name");
+      const agentRequestedByInput = document.getElementById("agent-requested-by");
+      const agentThreadIdInput = document.getElementById("agent-thread-id");
 
       endpointLabel.textContent = OVERVIEW_PATH;
+      agentEndpointLabel.textContent = AGENT_PATH;
 
       const storageKeys = {
         audit: "helpdesk-runtime-audit-token",
@@ -419,8 +467,6 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
         refresh: "helpdesk-runtime-refresh-ms",
       };
 
-      auditTokenInput.value = sessionStorage.getItem(storageKeys.audit) || "";
-      automationTokenInput.value = sessionStorage.getItem(storageKeys.automation) || "";
       refreshInput.value = sessionStorage.getItem(storageKeys.refresh) || refreshInput.value;
 
       let refreshTimer = null;
@@ -442,18 +488,34 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
         return date.toLocaleString();
       }
 
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
       function renderPairs(container, pairs) {
         container.innerHTML = pairs
-          .map(([label, value]) => `<li><span>${label}</span><small>${value}</small></li>`)
+          .map(([label, value]) => `<li><span>${escapeHtml(label)}</span><small>${escapeHtml(value)}</small></li>`)
           .join("") || '<div class="empty">Sem dados.</div>';
+      }
+
+      function renderBulletList(title, items) {
+        const normalizedItems = Array.isArray(items) ? items.filter(Boolean) : [];
+        if (!normalizedItems.length) return "";
+        const body = normalizedItems.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+        return `<h3>${escapeHtml(title)}</h3><ul class="list">${body}</ul>`;
       }
 
       function renderKpis(container, items) {
         container.innerHTML = items
           .map((item) => `
             <div class="kpi">
-              <strong>${item.value}</strong>
-              <span>${item.label}</span>
+              <strong>${escapeHtml(item.value)}</strong>
+              <span>${escapeHtml(item.label)}</span>
             </div>
           `)
           .join("");
@@ -464,9 +526,9 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
           container.innerHTML = `<div class="empty">${emptyMessage}</div>`;
           return;
         }
-        const head = columns.map((column) => `<th>${column.label}</th>`).join("");
+        const head = columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("");
         const body = rows
-          .map((row) => `<tr>${columns.map((column) => `<td>${row[column.key] ?? "-"}</td>`).join("")}</tr>`)
+          .map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(row[column.key] ?? "-")}</td>`).join("")}</tr>`)
           .join("");
         container.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
       }
@@ -641,8 +703,6 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
           return;
         }
 
-        sessionStorage.setItem(storageKeys.audit, auditToken);
-        sessionStorage.setItem(storageKeys.automation, automationToken);
         sessionStorage.setItem(storageKeys.refresh, refreshInput.value.trim());
         setStatus("Consultando backend runtime...");
 
@@ -669,6 +729,184 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
         }
       }
 
+      function optionalInputValue(input) {
+        const value = input.value.trim();
+        return value.length ? value : undefined;
+      }
+
+      function renderAgentResult(data) {
+        const policy = data.policy || {};
+        const events = (data.correlated_events || []).map((event) => ({
+          event_id: event.event_id,
+          severity: event.severity,
+          summary: event.summary,
+          host: event.host || "-",
+        }));
+        const evidence = (data.evidence || []).map((item) => ({
+          source: item.source,
+          kind: item.kind,
+          title: item.title,
+          detail: item.detail || "-",
+        }));
+        const knowledge = (data.knowledge_hits || []).map((item) => ({
+          kind: item.kind,
+          title: item.title,
+          reference: item.reference,
+          score: item.score,
+        }));
+        const memory = (data.memory_hits || []).map((item) => ({
+          namespace: item.namespace,
+          memory_key: item.memory_key,
+          title: item.title,
+          updated_at: formatTime(item.updated_at),
+        }));
+
+        agentResult.innerHTML = `
+          <div class="grid" style="margin-top: 18px;">
+            <div class="panel span-6">
+              <h2>Resumo da investigacao</h2>
+              <ul class="list">
+                <li><span>Modo</span><small>${escapeHtml(data.mode)} | ${escapeHtml(data.checkpoint_mode)}</small></li>
+                <li><span>Thread</span><small>${escapeHtml(data.thread_id)}</small></li>
+                <li><span>Historico checkpoint</span><small>${escapeHtml(data.checkpoint_history_count)}</small></li>
+                <li><span>Politica</span><small>${escapeHtml(policy.mode || "n/a")}</small></li>
+              </ul>
+              <p class="muted">${escapeHtml(data.summary)}</p>
+              <p>${escapeHtml(data.hypothesis || "Sem hipotese consolidada.")}</p>
+            </div>
+            <div class="panel span-6">
+              <h2>Governanca</h2>
+              <ul class="list">
+                <li><span>Leitura</span><small>${policy.can_read_data ? "permitida" : "bloqueada"}</small></li>
+                <li><span>Escrita</span><small>${policy.can_execute_write_actions ? "permitida" : "bloqueada"}</small></li>
+                <li><span>Aprovacao para escrita</span><small>${policy.approval_required_for_write ? "obrigatoria" : "n/a"}</small></li>
+              </ul>
+              <p class="muted">${escapeHtml(policy.rationale || "Sem racional de politica.")}</p>
+            </div>
+            <div class="panel span-6">
+              ${renderBulletList("Acoes recomendadas", data.recommended_actions)}
+              ${renderBulletList("Automacoes candidatas", data.candidate_automations)}
+            </div>
+            <div class="panel span-6">
+              ${renderBulletList("Tools usadas", data.used_tools)}
+              ${renderBulletList("Notas", data.notes)}
+            </div>
+            <div class="panel span-12">
+              <h2>Eventos correlacionados</h2>
+              <div id="agent-events-table"></div>
+            </div>
+            <div class="panel span-12">
+              <h2>Evidencias</h2>
+              <div id="agent-evidence-table"></div>
+            </div>
+            <div class="panel span-6">
+              <h2>Conhecimento recuperado</h2>
+              <div id="agent-knowledge-table"></div>
+            </div>
+            <div class="panel span-6">
+              <h2>Memoria operacional</h2>
+              <div id="agent-memory-table"></div>
+            </div>
+          </div>
+        `;
+
+        renderSimpleTable(
+          document.getElementById("agent-events-table"),
+          [
+            { key: "event_id", label: "Evento" },
+            { key: "severity", label: "Severidade" },
+            { key: "summary", label: "Resumo" },
+            { key: "host", label: "Host" },
+          ],
+          events,
+          "Nenhum evento correlacionado.",
+        );
+        renderSimpleTable(
+          document.getElementById("agent-evidence-table"),
+          [
+            { key: "source", label: "Fonte" },
+            { key: "kind", label: "Tipo" },
+            { key: "title", label: "Titulo" },
+            { key: "detail", label: "Detalhe" },
+          ],
+          evidence,
+          "Nenhuma evidencia retornada.",
+        );
+        renderSimpleTable(
+          document.getElementById("agent-knowledge-table"),
+          [
+            { key: "kind", label: "Tipo" },
+            { key: "title", label: "Titulo" },
+            { key: "reference", label: "Referencia" },
+            { key: "score", label: "Score" },
+          ],
+          knowledge,
+          "Nenhum conhecimento operacional recuperado.",
+        );
+        renderSimpleTable(
+          document.getElementById("agent-memory-table"),
+          [
+            { key: "namespace", label: "Namespace" },
+            { key: "memory_key", label: "Chave" },
+            { key: "title", label: "Titulo" },
+            { key: "updated_at", label: "Atualizada" },
+          ],
+          memory,
+          "Nenhuma memoria operacional reaproveitada.",
+        );
+      }
+
+      async function investigateWithAgent() {
+        const automationToken = automationTokenInput.value.trim();
+        if (!automationToken) {
+          agentStatus.textContent = "Preencha o automation read token para investigar.";
+          agentStatus.className = "error";
+          return;
+        }
+
+        const payload = {
+          ticket_id: optionalInputValue(agentTicketIdInput),
+          service_name: optionalInputValue(agentServiceNameInput),
+          asset_name: optionalInputValue(agentAssetNameInput),
+          requested_by: optionalInputValue(agentRequestedByInput) || "ops-dashboard",
+          thread_id: optionalInputValue(agentThreadIdInput),
+        };
+
+        if (!payload.ticket_id && !payload.service_name && !payload.asset_name) {
+          agentStatus.textContent = "Informe ticket, servico ou ativo para investigar.";
+          agentStatus.className = "error";
+          return;
+        }
+
+        agentStatus.textContent = "Investigando com agente LangGraph...";
+        agentStatus.className = "";
+        agentButton.disabled = true;
+        try {
+          const response = await fetch(AGENT_PATH, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Helpdesk-Automation-Read-Key": automationToken,
+            },
+            body: JSON.stringify(payload),
+          });
+          const contentType = response.headers.get("content-type") || "";
+          const body = contentType.includes("application/json") ? await response.json() : null;
+          if (!response.ok) {
+            const detail = body && body.detail ? body.detail : `HTTP ${response.status}`;
+            throw new Error(detail);
+          }
+          renderAgentResult(body);
+          agentStatus.textContent = "Investigacao concluida.";
+          agentStatus.className = "";
+        } catch (error) {
+          agentStatus.textContent = `Falha na investigacao: ${error.message}`;
+          agentStatus.className = "error";
+        } finally {
+          agentButton.disabled = false;
+        }
+      }
+
       function toggleAutoRefresh() {
         if (refreshTimer) {
           clearInterval(refreshTimer);
@@ -683,8 +921,9 @@ def build_runtime_dashboard_html(*, api_prefix: str) -> str:
 
       loadButton.addEventListener("click", loadOverview);
       toggleButton.addEventListener("click", toggleAutoRefresh);
+      agentButton.addEventListener("click", investigateWithAgent);
     </script>
   </body>
 </html>
 """
-    return template.replace("__OVERVIEW_PATH__", overview_path_json)
+    return template.replace("__OVERVIEW_PATH__", overview_path_json).replace("__AGENT_PATH__", agent_path_json)

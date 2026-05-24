@@ -37,6 +37,9 @@ from app.schemas.helpdesk import (
     LLMGenerateResponse,
     IdentityLookupResponse,
     LLMStatusResponse,
+    NOCAlertReviewRequest,
+    NOCAlertReviewResponse,
+    NOCOperationalReportResponse,
     NormalizedWhatsAppMessage,
     RuntimeAuditOverviewResponse,
     RuntimeAutomationRunnerStatusResponse,
@@ -140,6 +143,30 @@ async def get_ticket_operations_summary(
     orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
 ) -> TicketOperationsSummaryResponse:
     return await orchestrator.get_ticket_operations_summary()
+
+
+@router.get(
+    "/helpdesk/noc/report",
+    response_model=NOCOperationalReportResponse,
+    dependencies=[Depends(require_audit_access), Depends(require_automation_read_access)],
+)
+async def get_noc_operational_report(
+    period_label: str = Query(default="periodo atual", min_length=3, max_length=120),
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> NOCOperationalReportResponse:
+    return await orchestrator.get_noc_operational_report(period_label=period_label)
+
+
+@router.post(
+    "/helpdesk/noc/alerts/review",
+    response_model=NOCAlertReviewResponse,
+    dependencies=[Depends(require_audit_access)],
+)
+async def review_noc_alerts(
+    payload: NOCAlertReviewRequest,
+    orchestrator: HelpdeskOrchestrator = Depends(get_helpdesk_orchestrator),
+) -> NOCAlertReviewResponse:
+    return await orchestrator.review_noc_alerts(payload)
 
 
 @router.get(
@@ -520,7 +547,9 @@ async def receive_evolution_whatsapp_webhook(
         )
 
     raw_body = await request.body()
-    provided_secret = secret_header or secret_query
+    provided_secret = secret_header
+    if provided_secret is None and settings.evolution_webhook_allow_query_secret:
+        provided_secret = secret_query
     if not whatsapp_client.validate_evolution_webhook_secret(provided_secret):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

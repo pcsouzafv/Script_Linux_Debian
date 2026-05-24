@@ -90,7 +90,8 @@ Para ligar a instância ao backend, o webhook fica configurado com:
 - evento: `MESSAGES_UPSERT`
 - `base64`: `false`
 - URL: endpoint público do backend apontando para `/api/v1/webhooks/whatsapp/evolution`
-- header opcional: `X-Evolution-Webhook-Secret: <segredo>` quando `HELPDESK_EVOLUTION_WEBHOOK_SECRET` estiver configurado no backend
+- header obrigatorio recomendado: `X-Evolution-Webhook-Secret: <segredo>` quando `HELPDESK_EVOLUTION_WEBHOOK_SECRET` estiver configurado no backend
+- query string `?secret=...` deve ficar desabilitada em producao; use apenas com `HELPDESK_EVOLUTION_WEBHOOK_ALLOW_QUERY_SECRET=true` em contingencia controlada
 
 Se preferir, grave a URL no `.env` local e rode sem argumentos:
 

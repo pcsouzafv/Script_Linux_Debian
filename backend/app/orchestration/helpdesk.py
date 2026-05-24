@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import hashlib
 
 from app.schemas.helpdesk import (
     AutomationJobCreateRequest,
@@ -13,6 +14,12 @@ from app.schemas.helpdesk import (
     CorrelationResponse,
     IdentityLookupResponse,
     MassIncidentCandidateResponse,
+    NOCActionItemResponse,
+    NOCAlertReviewItemRequest,
+    NOCAlertClassificationResponse,
+    NOCAlertReviewRequest,
+    NOCAlertReviewResponse,
+    NOCOperationalReportResponse,
     NormalizedWhatsAppMessage,
     OperationalAssistantResponse,
     RequesterIdentity,
@@ -77,6 +84,26 @@ OPERATOR_COMMAND_ALIASES: dict[str, str] = {
     "iniciar": "help",
     "inicio": "help",
     "start": "help",
+}
+STATUS_QUERY_ALIASES = {"atual", "consulta", "consultar", "current", "status", "ver"}
+OPERATOR_GREETING_MESSAGES = {
+    "bom dia",
+    "boa noite",
+    "boa tarde",
+    "hello",
+    "hi",
+    "ola",
+    "olá",
+    "oi",
+}
+LLM_OPERATOR_REPLY_FORBIDDEN_MARKERS = {
+    "aqui está",
+    "mensagem base",
+    "mensagem reescrita",
+    "prompt",
+    "reescreva",
+    "reescrevi",
+    "reescrita",
 }
 
 OPERATIONAL_ROLES = {
@@ -1000,6 +1027,385 @@ class HelpdeskOrchestrator:
             notes=summary.notes,
         )
 
+    async def get_noc_operational_report(
+        self,
+        period_label: str = "periodo atual",
+    ) -> NOCOperationalReportResponse:
+        ticket_summary = await self.get_ticket_operations_summary()
+        automation_summary = await self.get_automation_summary()
+        action_items = self._build_noc_action_items(ticket_summary, automation_summary)
+        operational_risks = self._build_noc_operational_risks(
+            ticket_summary,
+            automation_summary,
+        )
+        agenda = self._build_incident_meeting_agenda(ticket_summary, action_items)
+
+        executive_summary = (
+            f"NOC com {ticket_summary.unresolved_backlog_count} ticket(s) em backlog, "
+            f"{ticket_summary.high_priority_backlog_count} de alta criticidade, "
+            f"{ticket_summary.mass_incident_candidate_count} agrupamento(s) candidato(s) "
+            f"a incidente em massa e {automation_summary.total_jobs} job(s) de automacao "
+            "no periodo analisado."
+        )
+        if operational_risks:
+            executive_summary = f"{executive_summary} Riscos principais: {operational_risks[0]}"
+
+        return NOCOperationalReportResponse(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            period_label=period_label.strip() or "periodo atual",
+            executive_summary=executive_summary,
+            ticket_operations=ticket_summary,
+            automation=automation_summary,
+            action_items=action_items,
+            incident_meeting_agenda=agenda,
+            operational_risks=operational_risks,
+            notes=[
+                *ticket_summary.notes,
+                *automation_summary.notes,
+                "Relatorio consolidado gerado a partir de snapshots analiticos, auditoria operacional e fila de automacao.",
+            ],
+        )
+
+    async def review_noc_alerts(
+        self,
+        payload: NOCAlertReviewRequest,
+    ) -> NOCAlertReviewResponse:
+        classifications = [
+            self._classify_noc_alert(alert)
+            for alert in payload.alerts
+        ]
+        classification_counts: dict[str, int] = {}
+        for item in classifications:
+            classification_counts[item.classification] = (
+                classification_counts.get(item.classification, 0) + 1
+            )
+
+        average_assertiveness = 0.0
+        if classifications:
+            average_assertiveness = round(
+                sum(item.assertiveness_percent for item in classifications)
+                / len(classifications),
+                2,
+            )
+
+        action_items = self._build_alert_review_action_items(classifications)
+        notes = ["Revisao heuristica executada com base nos metadados enviados."]
+        if not classifications:
+            notes.append("Nenhum alerta informado para classificacao.")
+
+        return NOCAlertReviewResponse(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            period_label=payload.period_label,
+            total_alerts=len(classifications),
+            classification_counts=classification_counts,
+            average_assertiveness_percent=average_assertiveness,
+            alerts=classifications,
+            action_items=action_items,
+            notes=notes,
+        )
+
+    def _build_noc_action_items(
+        self,
+        ticket_summary: TicketOperationsSummaryResponse,
+        automation_summary: AutomationSummaryResponse,
+    ) -> list[NOCActionItemResponse]:
+        action_items: list[NOCActionItemResponse] = []
+
+        if ticket_summary.mass_incident_candidate_count > 0:
+            candidate = ticket_summary.mass_incident_candidates[0]
+            action_items.append(
+                NOCActionItemResponse(
+                    area="gestao_incidentes",
+                    priority=TicketPriority.CRITICAL,
+                    title="Avaliar incidente em massa candidato",
+                    recommendation=(
+                        "Abrir ou vincular incidente pai no ITSM e conduzir pauta na reuniao de Gestao de Incidentes."
+                    ),
+                    evidence=(
+                        f"{candidate.ticket_count} ticket(s) agrupados por {candidate.scope} em {candidate.label}."
+                    ),
+                    owner_hint=candidate.routed_to or "Supervisor NOC",
+                    due_hint="hoje",
+                )
+            )
+
+        if ticket_summary.unassigned_backlog_count > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="helpdesk",
+                    priority=TicketPriority.HIGH,
+                    title="Distribuir backlog sem responsavel",
+                    recommendation=(
+                        "Atribuir tickets sem dono e registrar primeira tratativa para reduzir aging operacional."
+                    ),
+                    evidence=f"{ticket_summary.unassigned_backlog_count} ticket(s) em backlog sem atribuicao.",
+                    owner_hint="Supervisor NOC",
+                    due_hint="proximo ciclo operacional",
+                )
+            )
+
+        if ticket_summary.high_priority_backlog_count > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="sla",
+                    priority=TicketPriority.HIGH,
+                    title="Revisar tickets de alta criticidade",
+                    recommendation=(
+                        "Validar severidade, comunicacao, escalonamento e risco de SLA para tickets high/critical."
+                    ),
+                    evidence=(
+                        f"{ticket_summary.high_priority_backlog_count} ticket(s) high/critical ainda nao resolvido(s)."
+                    ),
+                    owner_hint="Gestao de Incidentes",
+                    due_hint="8 x 5",
+                )
+            )
+
+        if (
+            ticket_summary.unresolved_backlog_count > 0
+            and ticket_summary.backlog_assignment_coverage_percent < 80
+        ):
+            action_items.append(
+                NOCActionItemResponse(
+                    area="processos",
+                    priority=TicketPriority.MEDIUM,
+                    title="Melhorar cobertura de atribuicao da fila",
+                    recommendation="Revisar roteamento, grupos responsaveis e regra de escalonamento inicial.",
+                    evidence=(
+                        f"Cobertura de atribuicao em {ticket_summary.backlog_assignment_coverage_percent}%."
+                    ),
+                    owner_hint="Dono do processo ITSM",
+                )
+            )
+
+        if (
+            ticket_summary.total_tickets > 0
+            and ticket_summary.average_correlation_event_count < 1
+        ):
+            action_items.append(
+                NOCActionItemResponse(
+                    area="monitoracao",
+                    priority=TicketPriority.MEDIUM,
+                    title="Aumentar correlacao entre tickets e eventos",
+                    recommendation=(
+                        "Revisar tags, servicos, ativos e regra de integracao entre monitoracao e ITSM."
+                    ),
+                    evidence=(
+                        "Media de eventos correlacionados por ticket abaixo de 1.0 "
+                        f"({ticket_summary.average_correlation_event_count})."
+                    ),
+                    owner_hint="Monitoracao",
+                )
+            )
+
+        if automation_summary.dead_letter_queue_depth > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="automacao",
+                    priority=TicketPriority.HIGH,
+                    title="Tratar automacoes em dead-letter",
+                    recommendation=(
+                        "Analisar erros, corrigir pre-condicoes e decidir reprocessamento ou cancelamento."
+                    ),
+                    evidence=f"{automation_summary.dead_letter_queue_depth} job(s) na dead-letter queue.",
+                    owner_hint="Administrador da plataforma",
+                    due_hint="hoje",
+                )
+            )
+
+        if automation_summary.queue_depth > 10:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="automacao",
+                    priority=TicketPriority.MEDIUM,
+                    title="Verificar profundidade da fila de automacao",
+                    recommendation=(
+                        "Avaliar capacidade do worker, retries e aprovacao pendente antes de ampliar uso operacional."
+                    ),
+                    evidence=f"{automation_summary.queue_depth} job(s) aguardando processamento.",
+                    owner_hint="Administrador da plataforma",
+                )
+            )
+
+        return action_items
+
+    def _build_noc_operational_risks(
+        self,
+        ticket_summary: TicketOperationsSummaryResponse,
+        automation_summary: AutomationSummaryResponse,
+    ) -> list[str]:
+        risks: list[str] = []
+        if ticket_summary.mass_incident_candidate_count > 0:
+            risks.append("ha agrupamentos de tickets que podem indicar incidente em massa")
+        if ticket_summary.high_priority_backlog_count > 0:
+            risks.append("existem tickets high/critical ainda nao resolvidos")
+        if ticket_summary.unassigned_backlog_count > 0:
+            risks.append("ha backlog sem responsavel atribuido")
+        if automation_summary.dead_letter_queue_depth > 0:
+            risks.append("ha automacoes em dead-letter que exigem decisao operacional")
+        if not risks:
+            risks.append("nenhum risco operacional critico foi detectado pelas heuristicas atuais")
+        return risks
+
+    def _build_incident_meeting_agenda(
+        self,
+        ticket_summary: TicketOperationsSummaryResponse,
+        action_items: list[NOCActionItemResponse],
+    ) -> list[str]:
+        agenda = [
+            "Revisar incidentes high/critical abertos e em risco de SLA.",
+            "Validar tickets sem atribuicao e responsaveis por fila.",
+            "Revisar recorrencias por servico, ativo, categoria e causa raiz.",
+            "Confirmar comunicacoes realizadas para equipes impactadas.",
+            "Definir acoes preventivas, demandas e mudancas relacionadas.",
+        ]
+        if ticket_summary.mass_incident_candidate_count > 0:
+            agenda.insert(0, "Decidir abertura ou vinculacao de incidente pai para agrupamentos candidatos.")
+        if any(item.area == "monitoracao" for item in action_items):
+            agenda.append("Priorizar revisao de alertas, tags e correlacao monitoracao-ITSM.")
+        return agenda
+
+    def _classify_noc_alert(
+        self,
+        alert: NOCAlertReviewItemRequest,
+    ) -> NOCAlertClassificationResponse:
+        missing_fields = self._missing_alert_fields(alert)
+        evidence: list[str] = []
+        if missing_fields:
+            evidence.append(f"Campos obrigatorios ausentes: {', '.join(missing_fields)}.")
+
+        if alert.duplicate_of:
+            classification = "redundante"
+            recommended_action = "Consolidar com o alerta principal ou desativar com aprovacao."
+            evidence.append(f"Marcado como duplicado de {alert.duplicate_of}.")
+        elif missing_fields:
+            classification = "incompleto"
+            recommended_action = "Completar metadados, dono, runbook, recuperacao e regra ITSM."
+        elif alert.event_count > 0 and alert.incident_count == 0:
+            classification = "ruidoso"
+            recommended_action = "Ajustar expressao, janela, dependencia, severidade ou supressao."
+            evidence.append("Alerta possui eventos sem incidentes relacionados.")
+        elif self._false_positive_rate(alert) >= 60:
+            classification = "ruidoso"
+            recommended_action = "Revisar threshold e dependencia; validar com historico de incidentes."
+            evidence.append(f"Taxa de falso positivo em {self._false_positive_rate(alert)}%.")
+        else:
+            classification = "assertivo"
+            recommended_action = "Manter ativo, garantir POP/runbook e acompanhar tendencia."
+            evidence.append("Metadados minimos presentes e relacao operacional aceitavel.")
+
+        assertiveness = self._alert_assertiveness_percent(alert, classification, missing_fields)
+
+        return NOCAlertClassificationResponse(
+            alert_name=alert.alert_name,
+            service_name=alert.service_name,
+            asset_name=alert.asset_name,
+            severity=alert.severity,
+            classification=classification,
+            assertiveness_percent=assertiveness,
+            recommended_action=recommended_action,
+            missing_fields=missing_fields,
+            evidence=evidence,
+        )
+
+    def _missing_alert_fields(
+        self,
+        alert: NOCAlertReviewItemRequest,
+    ) -> list[str]:
+        missing: list[str] = []
+        required_values = {
+            "service_name_or_asset_name": alert.service_name or alert.asset_name,
+            "severity": alert.severity,
+            "responsible_group": alert.responsible_group,
+            "runbook": alert.runbook,
+            "trigger_expression": alert.trigger_expression,
+            "recovery_criteria": alert.recovery_criteria,
+        }
+        for field_name, value in required_values.items():
+            if not str(value or "").strip():
+                missing.append(field_name)
+        if not alert.has_itsm_rule:
+            missing.append("itsm_rule")
+        return missing
+
+    def _false_positive_rate(
+        self,
+        alert: NOCAlertReviewItemRequest,
+    ) -> float:
+        if alert.event_count <= 0:
+            return 0.0
+        return round((alert.false_positive_count / alert.event_count) * 100, 2)
+
+    def _alert_assertiveness_percent(
+        self,
+        alert: NOCAlertReviewItemRequest,
+        classification: str,
+        missing_fields: list[str],
+    ) -> float:
+        if alert.event_count <= 0:
+            base = 50.0
+        else:
+            valid_events = max(0, alert.event_count - alert.false_positive_count)
+            base = round((valid_events / alert.event_count) * 100, 2)
+
+        base -= len(missing_fields) * 8
+        if classification == "redundante":
+            base -= 25
+        elif classification == "incompleto":
+            base -= 15
+        elif classification == "ruidoso":
+            base -= 10
+
+        return round(min(100.0, max(0.0, base)), 2)
+
+    def _build_alert_review_action_items(
+        self,
+        classifications: list[NOCAlertClassificationResponse],
+    ) -> list[NOCActionItemResponse]:
+        counts: dict[str, int] = {}
+        for item in classifications:
+            counts[item.classification] = counts.get(item.classification, 0) + 1
+
+        action_items: list[NOCActionItemResponse] = []
+        if counts.get("ruidoso", 0) > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="monitoracao",
+                    priority=TicketPriority.HIGH,
+                    title="Reduzir alertas ruidosos",
+                    recommendation=(
+                        "Revisar thresholds, dependencias, janelas e severidades dos alertas classificados como ruidosos."
+                    ),
+                    evidence=f"{counts['ruidoso']} alerta(s) com baixa assertividade operacional.",
+                    owner_hint="Monitoracao",
+                )
+            )
+        if counts.get("redundante", 0) > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="monitoracao",
+                    priority=TicketPriority.MEDIUM,
+                    title="Consolidar alertas redundantes",
+                    recommendation="Desativar ou agrupar duplicidades apos aprovacao e registro de mudanca.",
+                    evidence=f"{counts['redundante']} alerta(s) redundante(s).",
+                    owner_hint="Monitoracao",
+                )
+            )
+        if counts.get("incompleto", 0) > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="processos",
+                    priority=TicketPriority.MEDIUM,
+                    title="Completar governanca dos alertas",
+                    recommendation=(
+                        "Preencher dono, runbook, criterio de recuperacao, tags e regra ITSM antes de considerar produtivo."
+                    ),
+                    evidence=f"{counts['incompleto']} alerta(s) sem campos obrigatorios.",
+                    owner_hint="Dono do processo NOC",
+                )
+            )
+        return action_items
+
     async def process_whatsapp_webhook_messages(
         self,
         messages: list[NormalizedWhatsAppMessage],
@@ -1011,13 +1417,17 @@ class HelpdeskOrchestrator:
         now = datetime.now(timezone.utc)
         self._purge_processed_whatsapp_message_ids(now)
         for message in messages:
-            dedup_key = self._whatsapp_message_dedup_key(message)
-            if dedup_key and dedup_key in PROCESSED_WHATSAPP_MESSAGE_IDS:
+            dedup_keys = self._whatsapp_message_dedup_keys(message)
+            matched_dedup_key = next(
+                (key for key in dedup_keys if key in PROCESSED_WHATSAPP_MESSAGE_IDS),
+                None,
+            )
+            if matched_dedup_key:
                 ignored_events.append(
-                    f"Mensagem duplicada ignorada: {message.external_message_id}."
+                    self._build_whatsapp_duplicate_note(message, matched_dedup_key)
                 )
                 continue
-            if dedup_key:
+            for dedup_key in dedup_keys:
                 PROCESSED_WHATSAPP_MESSAGE_IDS[dedup_key] = now
             try:
                 response = await self.process_whatsapp_message(message)
@@ -1027,7 +1437,7 @@ class HelpdeskOrchestrator:
                 )
                 continue
             except Exception:
-                if dedup_key:
+                for dedup_key in dedup_keys:
                     PROCESSED_WHATSAPP_MESSAGE_IDS.pop(dedup_key, None)
                 raise
             interactions.append(response)
@@ -1054,10 +1464,25 @@ class HelpdeskOrchestrator:
     ) -> WhatsAppWebhookProcessingResponse:
         return await self.process_whatsapp_webhook_messages(messages, ignored_events)
 
-    def _whatsapp_message_dedup_key(self, message: NormalizedWhatsAppMessage) -> str | None:
-        if not message.external_message_id:
-            return None
-        return f"{message.sender_phone}:{message.external_message_id}"
+    def _whatsapp_message_dedup_keys(self, message: NormalizedWhatsAppMessage) -> list[str]:
+        keys: list[str] = []
+        if message.external_message_id:
+            keys.append(f"id:{message.sender_phone}:{message.external_message_id}")
+
+        normalized_text = " ".join(message.text.casefold().split())
+        if normalized_text:
+            digest = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()[:20]
+            keys.append(f"content:{message.sender_phone}:{digest}")
+        return keys
+
+    def _build_whatsapp_duplicate_note(
+        self,
+        message: NormalizedWhatsAppMessage,
+        dedup_key: str,
+    ) -> str:
+        if dedup_key.startswith("content:"):
+            return "Mensagem duplicada ignorada: conteúdo recente já processado."
+        return f"Mensagem duplicada ignorada: {message.external_message_id}."
 
     def _purge_processed_whatsapp_message_ids(self, now: datetime) -> None:
         expired_before = now - WHATSAPP_MESSAGE_DEDUP_TTL
@@ -1155,6 +1580,29 @@ class HelpdeskOrchestrator:
         message: NormalizedWhatsAppMessage,
         requester: RequesterIdentity,
     ) -> OperationalAssistantResponse:
+        available_commands = self._available_command_docs(requester.role)
+        if self._is_greeting_only(message.text):
+            return OperationalAssistantResponse(
+                role=requester.role,
+                flow_name=self._flow_name_for_role(requester.role),
+                reply_text=self._build_operator_greeting_reply(requester),
+                triage=TicketTriageResponse(
+                    suggested_priority=TicketPriority.MEDIUM,
+                    resolved_priority=TicketPriority.MEDIUM,
+                    suggested_queue="NOC-Operacional",
+                    confidence="low",
+                    summary="Saudacao operacional sem incidente informado.",
+                    next_steps=["Use /help para comandos ou /open <descrição> para abrir chamado."],
+                    mode="local",
+                    notes=["Saudacao simples respondida sem acionar LLM ou abrir chamado."],
+                ),
+                available_commands=available_commands,
+                notes=[
+                    f"Fluxo operacional aplicado para o papel {requester.role.value}.",
+                    "Saudacao simples respondida sem triagem operacional detalhada.",
+                ],
+            )
+
         triage = await self.triage_ticket(
             TicketTriageRequest(
                 subject=self._build_subject_from_text(message.text, prefix="Operacional WhatsApp"),
@@ -1171,7 +1619,6 @@ class HelpdeskOrchestrator:
                 requester_team=requester.team,
             )
         )
-        available_commands = self._available_command_docs(requester.role)
         reply_text, reply_notes = await self._compose_operator_assistant_reply(
             role=requester.role,
             triage=triage,
@@ -1211,6 +1658,8 @@ class HelpdeskOrchestrator:
             "Reescreva a mensagem base abaixo para WhatsApp com tom humano, cordial e profissional. "
             "Preserve exatamente comandos com '/', filas, status e fatos tecnicos. "
             "Nao invente informacoes, nao prometa execucao automatica e nao remova alertas de seguranca. "
+            "Responda apenas com a mensagem final ao usuario. "
+            "Nao diga que reescreveu, revisou, melhorou ou formatou a mensagem. "
             "Responda com no maximo 6 linhas.\n\n"
             f"Papel operacional: {role.value}\n"
             f"Resumo da triagem: {triage.summary}\n"
@@ -1226,7 +1675,8 @@ class HelpdeskOrchestrator:
                 user_prompt=prompt,
                 system_prompt=(
                     "Voce melhora a redacao de um assistente virtual de helpdesk. "
-                    "Seja natural, claro e confiavel sem perder objetividade."
+                    "Seja natural, claro e confiavel sem perder objetividade. "
+                    "Nunca inclua prefacios como 'aqui esta' ou 'mensagem reescrita'."
                 ),
                 max_tokens=220,
                 temperature=0.3,
@@ -1234,10 +1684,53 @@ class HelpdeskOrchestrator:
         except IntegrationError:
             return base_reply, []
 
-        refined_reply = result.content.strip()
+        refined_reply = self._sanitize_operator_llm_reply(result.content)
         if not refined_reply:
-            return base_reply, []
+            return base_reply, [
+                "IA retornou resposta operacional fora do contrato; mantida mensagem padrao."
+            ]
         return refined_reply, [f"Resposta operacional refinada pela IA ({result.provider})."]
+
+    def _is_greeting_only(self, text: str) -> bool:
+        normalized = text.strip().casefold().strip(" !?.;,:\n\t")
+        normalized = " ".join(normalized.split())
+        return normalized in OPERATOR_GREETING_MESSAGES
+
+    def _build_operator_greeting_reply(self, requester: RequesterIdentity) -> str:
+        first_name = (requester.display_name or requester.external_id or "").strip().split(" ")[0]
+        greeting_target = f", {first_name}" if first_name else ""
+        return (
+            f"Olá{greeting_target}. Modo operacional ativo para "
+            f"{self._role_display_name(requester.role)}.\n"
+            "Use /help para ver os comandos disponíveis.\n"
+            "Para abrir chamado: /open <descrição>."
+        )
+
+    def _sanitize_operator_llm_reply(self, content: str) -> str | None:
+        text = content.strip()
+        if not text:
+            return None
+
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+
+        lines = [line.strip() for line in text.splitlines()]
+        while lines and self._is_operator_llm_meta_line(lines[0]):
+            lines.pop(0)
+        text = "\n".join(line for line in lines if line).strip().strip('"').strip("'")
+
+        lowered = text.casefold()
+        if not text or len(text) > 1200:
+            return None
+        if any(marker in lowered for marker in LLM_OPERATOR_REPLY_FORBIDDEN_MARKERS):
+            return None
+        return text
+
+    def _is_operator_llm_meta_line(self, line: str) -> bool:
+        normalized = line.strip().casefold().strip(" :.-")
+        if not normalized:
+            return True
+        return any(marker in normalized for marker in LLM_OPERATOR_REPLY_FORBIDDEN_MARKERS)
 
     async def _run_operator_command(
         self,
@@ -1522,16 +2015,37 @@ class HelpdeskOrchestrator:
 
         if command_name == "status":
             status_parts = text.split(maxsplit=2)
-            if len(status_parts) < 3:
+            if len(status_parts) < 2:
                 return TechnicianCommandResponse(
                     command_name="status",
                     status="invalid",
                     operation_mode="local",
-                    reply_text="Uso: /status <ticket_id> <new|processing|planned|waiting|solved|closed>",
-                    notes=["Comando status recebido sem ticket ou status alvo."],
+                    reply_text="Uso: /status <ticket_id> [new|processing|planned|waiting|solved|closed]",
+                    notes=["Comando status recebido sem ticket."],
                 )
 
             ticket_id = status_parts[1].strip()
+            if len(status_parts) == 2 or status_parts[2].strip().lower() in STATUS_QUERY_ALIASES:
+                try:
+                    ticket = await self.get_ticket(ticket_id)
+                except ResourceNotFoundError:
+                    return TechnicianCommandResponse(
+                        command_name="status",
+                        status="not-found",
+                        operation_mode="local",
+                        reply_text=f"Ticket {ticket_id} não encontrado para consulta de status.",
+                        notes=["Consulta de status não executada porque o ticket não existe."],
+                    )
+
+                return TechnicianCommandResponse(
+                    command_name="status",
+                    status="completed",
+                    operation_mode=ticket.integration_mode,
+                    reply_text=self._build_operator_ticket_status_reply(ticket),
+                    ticket=ticket,
+                    notes=["Status do ticket consultado sem alterar o chamado."],
+                )
+
             status_name = status_parts[2].strip().lower()
             if status_name not in PRIVILEGED_ALLOWED_STATUSES:
                 return TechnicianCommandResponse(
@@ -2092,12 +2606,27 @@ class HelpdeskOrchestrator:
             f"Melhor próximo passo agora: {next_step}",
         ]
         if triage.resolution_hints:
-            parts.append(f"Tentativa segura sugerida: {triage.resolution_hints[0]}")
+            parts.append(f"Sugestao de resolucao: {triage.resolution_hints[0]}")
         if triage.similar_incidents:
-            parts.append(f"Referencia parecida: {triage.similar_incidents[0]}")
+            parts.append(f"Caso semelhante: {triage.similar_incidents[0]}")
         parts.append("Se quiser registrar um novo chamado, use /open <descrição>.")
         parts.append("Se preferir, envie /help para ver os comandos disponíveis.")
         return "\n".join(parts)
+
+    def _build_operator_ticket_status_reply(self, ticket: TicketDetailsResponse) -> str:
+        updated_at = ticket.updated_at or "sem data de atualização"
+        lines = [
+            f"Status atual do ticket {ticket.ticket_id}: {ticket.status}.",
+            f"Assunto: {ticket.subject}",
+            f"Prioridade: {ticket.priority}. Atualizado em: {updated_at}.",
+        ]
+        if ticket.assigned_glpi_user_id:
+            lines.append(f"Responsável GLPI: {ticket.assigned_glpi_user_id}.")
+        lines.append(
+            "Para alterar: /status "
+            f"{ticket.ticket_id} <new|processing|planned|waiting|solved|closed>."
+        )
+        return "\n".join(lines)
 
     def _to_ticket_resolution_entry_response(self, entry: object) -> TicketResolutionEntryResponse:
         return TicketResolutionEntryResponse(
@@ -2453,7 +2982,7 @@ class HelpdeskOrchestrator:
             "help": "/help",
             "me": "/me",
             "open": "/open <descrição>",
-            "status": "/status <id> <status>",
+            "status": "/status <id> [status]",
             "ticket": "/ticket <id>",
         }
         available_commands = sorted(ALLOWED_OPERATOR_COMMANDS.get(role, set()))

@@ -113,16 +113,42 @@ Situação observada hoje:
 
 O detalhamento técnico desta frente fica em [Fase 5: Operacao Avancada](fase-5-operacao-avancada.md).
 
+## Fase 6: Governanca operacional do NOC
+
+Status atual: planejada.
+
+Objetivo:
+Transformar a plataforma em apoio direto para gestao do NOC, conectando processos, pessoas, monitoracao, ITSM, demandas, mudancas, relatorios e melhoria continua.
+
+Entregas:
+
+- revisao, otimizacao e controle de POPs e Instrucoes Tecnicas;
+- capacitacao e trilhas de treinamento para Help Desk, incidentes, problemas e NOC;
+- relatorios e apresentacoes consolidadas do NOC;
+- gestao de demandas e precificacao no Azure DevOps;
+- gestao de mudancas com impacto no NOC;
+- revisao de alertas com baixa assertividade, redundancia e falsos positivos;
+- padronizacao de Zabbix, dashboards Grafana e paineis executivos;
+- integracao entre monitoracao e ITSM;
+- acompanhamento 8 x 5 de incidentes com correlacao entre eventos e sistemas;
+- controle de versoes, backup e auditoria de configuracoes;
+- indicadores para gestao operacional e tatica dos colaboradores.
+
+Critério de saída:
+NOC com processos versionados, indicadores rastreaveis, alertas revisados, dashboards validados, demandas controladas, mudancas governadas e relatorios executivos recorrentes.
+
+O detalhamento desta frente fica em [Evolucao NOC, ITSM e operacao padronizada](evolucao-noc-operacao.md).
+
 ## Backlog priorizado
 
-1. Estruturar backend principal de integração.
-2. Modelar usuários, técnicos, filas e permissões.
-3. Implementar fluxo de abertura de chamado por WhatsApp.
-4. Implementar notificação técnica.
-5. Implementar consulta a alertas do Zabbix.
-6. Adicionar correlação com tickets do GLPI.
-7. Adicionar RAG com base de conhecimento.
-8. Liberar primeira automação homologada de baixo risco.
+1. Fechar lacunas da Fase 5: relatorios completos, incidente em massa, pos-mortem e conhecimento.
+2. Criar catalogo versionado de POPs e Instrucoes Tecnicas.
+3. Criar rotina de revisao de alertas, Zabbix, dashboards e falsos positivos.
+4. Criar relatorios semanais e mensais consolidados do NOC.
+5. Implantar gestao de demandas, priorizacao e precificacao no Azure DevOps.
+6. Padronizar gestao de mudancas com impacto no NOC.
+7. Integrar monitoracao com ITSM para correlacao e registro automatico.
+8. Criar indicadores de pessoas, processos, produtividade, qualidade e capacitacao.
 
 ## Critérios de qualidade da próxima etapa
 

@@ -11,6 +11,7 @@ import app.services.operational_store as operational_store_module
 from app.core.config import get_settings
 from app.core.dependencies import get_glpi_client, get_zabbix_client
 from app.main import app
+from app.orchestration.helpdesk import PROCESSED_WHATSAPP_MESSAGE_IDS
 from app.services.docker_runtime import (
     DockerApplicationRecord,
     DockerContainerRecord,
@@ -275,6 +276,127 @@ def test_ticket_operations_summary_route_returns_mass_incident_candidates() -> N
     assert candidate["ticket_ids"] == ["601", "602", "603"]
     assert candidate["sample_subjects"][0] == "ERP fora do ar na operacao 1"
     assert candidate["notes"]
+
+
+def test_noc_operational_report_requires_audit_and_automation_read_scope() -> None:
+    response = client.get(
+        "/api/v1/helpdesk/noc/report",
+        headers=AUDIT_HEADERS,
+    )
+
+    assert response.status_code == 401
+    assert "leitura administrativa de automação" in response.json()["detail"].lower()
+
+
+def test_noc_operational_report_returns_actions_and_meeting_agenda() -> None:
+    store = TicketAnalyticsStore(get_settings())
+    now = datetime.now(timezone.utc)
+
+    asyncio.run(
+        store.upsert_snapshot(
+            TicketAnalyticsSnapshotRecord(
+                ticket_id="701",
+                subject="VPN indisponivel para diretoria",
+                description="Incidente critico reportado pela operacao.",
+                status="new",
+                priority="critical",
+                requester_glpi_user_id=31,
+                assigned_glpi_user_id=None,
+                external_id="helpdesk-api-701",
+                request_type_id=1,
+                request_type_name="Direct",
+                category_id=9,
+                category_name="Rede",
+                asset_name="vpn-edge-01",
+                service_name="vpn-corporativa",
+                source_channel="api",
+                routed_to="NOC-Critico",
+                correlation_event_count=0,
+                source_updated_at=now - timedelta(minutes=20),
+            )
+        )
+    )
+
+    response = client.get(
+        "/api/v1/helpdesk/noc/report?period_label=semana%20atual",
+        headers=RUNTIME_OVERVIEW_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["period_label"] == "semana atual"
+    assert "NOC com" in body["executive_summary"]
+    assert body["ticket_operations"]["unresolved_backlog_count"] >= 1
+    assert body["action_items"]
+    assert any(item["area"] in {"helpdesk", "sla", "monitoracao"} for item in body["action_items"])
+    assert body["incident_meeting_agenda"]
+    assert body["operational_risks"]
+
+
+def test_noc_alert_review_classifies_alert_quality() -> None:
+    response = client.post(
+        "/api/v1/helpdesk/noc/alerts/review",
+        headers=AUDIT_HEADERS,
+        json={
+            "period_label": "maio 2026",
+            "alerts": [
+                {
+                    "alert_name": "ERP HTTP 5xx alto",
+                    "service_name": "erp",
+                    "severity": "high",
+                    "responsible_group": "NOC-Critico",
+                    "runbook": "POP-ERP-HTTP",
+                    "trigger_expression": "5xx > 5%",
+                    "recovery_criteria": "5xx < 1%",
+                    "has_itsm_rule": True,
+                    "event_count": 10,
+                    "incident_count": 8,
+                    "false_positive_count": 1,
+                },
+                {
+                    "alert_name": "CPU alta transitoria",
+                    "asset_name": "app-01",
+                    "severity": "warning",
+                    "responsible_group": "Monitoracao",
+                    "runbook": "IT-CPU",
+                    "trigger_expression": "cpu > 80",
+                    "recovery_criteria": "cpu < 70",
+                    "has_itsm_rule": True,
+                    "event_count": 20,
+                    "incident_count": 0,
+                    "false_positive_count": 15,
+                },
+                {
+                    "alert_name": "Disco cheio duplicado",
+                    "asset_name": "db-01",
+                    "severity": "high",
+                    "responsible_group": "Banco",
+                    "runbook": "POP-DISCO",
+                    "trigger_expression": "disk > 90",
+                    "recovery_criteria": "disk < 80",
+                    "has_itsm_rule": True,
+                    "event_count": 4,
+                    "incident_count": 4,
+                    "false_positive_count": 0,
+                    "duplicate_of": "Disco cheio principal",
+                },
+                {
+                    "alert_name": "Alerta sem governanca",
+                    "event_count": 1,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_alerts"] == 4
+    assert body["classification_counts"]["assertivo"] == 1
+    assert body["classification_counts"]["ruidoso"] == 1
+    assert body["classification_counts"]["redundante"] == 1
+    assert body["classification_counts"]["incompleto"] == 1
+    assert body["average_assertiveness_percent"] > 0
+    assert len(body["action_items"]) == 3
 
 
 def test_runtime_overview_route_requires_automation_read_scope_alongside_audit_scope() -> None:
@@ -739,7 +861,13 @@ def test_ops_dashboard_page_is_available_for_browser_access() -> None:
     assert response.status_code == 200
     assert "Painel operacional do orquestrador" in response.text
     assert "/api/v1/helpdesk/runtime/overview" in response.text
+    assert "/api/v1/helpdesk/agent/investigate" in response.text
+    assert "Agente LangGraph" in response.text
+    assert "Investigar" in response.text
     assert "Containers Docker" in response.text
+    assert "function escapeHtml" in response.text
+    assert "sessionStorage.setItem(storageKeys.audit" not in response.text
+    assert "sessionStorage.setItem(storageKeys.automation" not in response.text
 
 
 def test_automation_route_rejects_api_token_without_dedicated_automation_token() -> None:
@@ -2663,6 +2791,28 @@ def test_admin_freeform_message_uses_admin_operational_flow() -> None:
     assert body["assistant_result"]["flow_name"] == "admin_operations"
 
 
+def test_admin_greeting_uses_clean_operational_reply() -> None:
+    payload = {
+        "sender_phone": "+5511900019999",
+        "sender_name": "Ricardo Santana",
+        "text": "Olá",
+        "requester_role": "user",
+    }
+
+    response = client.post("/api/v1/webhooks/whatsapp/messages", json=payload)
+
+    assert response.status_code == 202
+    body = response.json()
+    reply_text = body["assistant_result"]["reply_text"]
+    assert body["outcome_type"] == "assistant"
+    assert body["requester_role"] == "admin"
+    assert "Olá, Ricardo" in reply_text
+    assert "Modo operacional ativo para administrador" in reply_text
+    assert "mensagem reescrita" not in reply_text.casefold()
+    assert "aqui está" not in reply_text.casefold()
+    assert "confirm" not in reply_text.casefold()
+
+
 def test_technician_command_returns_operational_result() -> None:
     payload = {
         "sender_phone": "+5511912345678",
@@ -2747,6 +2897,61 @@ def test_evolution_duplicate_entrar_message_is_ignored_after_first_reply() -> No
     assert second_body["interactions"] == []
     assert second_body["integration_mode"] == "noop"
     assert any("duplicada" in event for event in second_body["ignored_events"])
+
+
+def test_evolution_duplicate_content_is_ignored_even_with_new_message_id() -> None:
+    settings = get_settings()
+    original_secret = settings.evolution_webhook_secret
+    settings.evolution_webhook_secret = "segredo-evolution"
+    PROCESSED_WHATSAPP_MESSAGE_IDS.clear()
+
+    payload = {
+        "event": "MESSAGES_UPSERT",
+        "data": {
+            "key": {
+                "remoteJid": "5521972008679@s.whatsapp.net",
+                "fromMe": False,
+                "id": "EVO-DUP-CONTENT-001",
+            },
+            "pushName": "Paula Almeida",
+            "message": {"conversation": "/help"},
+            "messageType": "conversation",
+        },
+    }
+    duplicate_payload = {
+        **payload,
+        "data": {
+            **payload["data"],
+            "key": {
+                **payload["data"]["key"],
+                "id": "EVO-DUP-CONTENT-002",
+            },
+        },
+    }
+
+    try:
+        first_response = client.post(
+            "/api/v1/webhooks/whatsapp/evolution",
+            json=payload,
+            headers={"X-Evolution-Webhook-Secret": "segredo-evolution"},
+        )
+        second_response = client.post(
+            "/api/v1/webhooks/whatsapp/evolution",
+            json=duplicate_payload,
+            headers={"X-Evolution-Webhook-Secret": "segredo-evolution"},
+        )
+    finally:
+        settings.evolution_webhook_secret = original_secret
+        PROCESSED_WHATSAPP_MESSAGE_IDS.clear()
+
+    assert first_response.status_code == 202
+    assert len(first_response.json()["interactions"]) == 1
+
+    assert second_response.status_code == 202
+    second_body = second_response.json()
+    assert second_body["interactions"] == []
+    assert second_body["integration_mode"] == "noop"
+    assert any("conteúdo recente" in event for event in second_body["ignored_events"])
 
 
 def test_technician_ticket_command_reads_existing_ticket() -> None:
@@ -2889,6 +3094,58 @@ def test_technician_status_command_updates_allowed_status() -> None:
     assert body["command_result"]["ticket"]["status"] == "processing"
     assert body["command_result"]["resolution_advice"]["ticket_id"] == ticket_id
     assert "Sugestao:" in body["command_result"]["reply_text"]
+
+
+def test_technician_status_command_reads_status_when_no_new_status_is_sent() -> None:
+    create_payload = {
+        "subject": "Banco de dados lento",
+        "description": "Consultas do ERP estão demorando mais de trinta segundos.",
+        "category": "infra",
+        "asset_name": "db-prod-02",
+        "service_name": "postgresql",
+        "priority": "high",
+        "requester": {
+            "external_id": "user-201",
+            "display_name": "Marina Lopes",
+            "phone_number": "+5511933332222",
+            "role": "user",
+        },
+    }
+    ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=create_payload).json()["ticket_id"]
+
+    response = client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5511912345678",
+            "sender_name": "Ana Souza",
+            "text": f"/status {ticket_id}",
+            "requester_role": "user",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["command_result"]["command_name"] == "status"
+    assert body["command_result"]["status"] == "completed"
+    assert body["command_result"]["ticket"]["ticket_id"] == ticket_id
+    assert body["command_result"]["ticket"]["status"] == MOCK_TICKET_STORE[ticket_id].status
+    assert "Status atual do ticket" in body["command_result"]["reply_text"]
+    assert "Uso:" not in body["command_result"]["reply_text"]
+
+    alias_response = client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5511912345678",
+            "sender_name": "Ana Souza",
+            "text": f"/status {ticket_id} status",
+            "requester_role": "user",
+        },
+    )
+
+    assert alias_response.status_code == 202
+    alias_body = alias_response.json()
+    assert alias_body["command_result"]["ticket"]["status"] == MOCK_TICKET_STORE[ticket_id].status
+    assert "Status inválido" not in alias_body["command_result"]["reply_text"]
 
 
 def test_technician_status_solved_records_solution_and_notifies_requester() -> None:

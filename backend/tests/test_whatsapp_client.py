@@ -239,7 +239,7 @@ def test_receive_evolution_webhook_rejects_invalid_secret() -> None:
     assert "evolution" in response.json()["detail"].lower()
 
 
-def test_receive_evolution_webhook_accepts_secret_query_fallback() -> None:
+def test_receive_evolution_webhook_rejects_secret_query_by_default() -> None:
     test_client = TestClient(app)
 
     class FakeOrchestrator:
@@ -255,7 +255,9 @@ def test_receive_evolution_webhook_accepts_secret_query_fallback() -> None:
 
     settings = get_settings()
     original_secret = settings.evolution_webhook_secret
+    original_allow_query = settings.evolution_webhook_allow_query_secret
     settings.evolution_webhook_secret = "segredo-evolution"
+    settings.evolution_webhook_allow_query_secret = False
 
     try:
         response = test_client.post(
@@ -276,6 +278,52 @@ def test_receive_evolution_webhook_accepts_secret_query_fallback() -> None:
         )
     finally:
         settings.evolution_webhook_secret = original_secret
+        settings.evolution_webhook_allow_query_secret = original_allow_query
+        app.dependency_overrides.pop(get_helpdesk_orchestrator, None)
+
+    assert response.status_code == 403
+
+
+def test_receive_evolution_webhook_accepts_secret_query_when_explicitly_enabled() -> None:
+    test_client = TestClient(app)
+
+    class FakeOrchestrator:
+        async def process_whatsapp_webhook_messages(self, messages, ignored_events):
+            return WhatsAppWebhookProcessingResponse(
+                processed_messages=len(messages),
+                interactions=[],
+                ignored_events=ignored_events,
+                integration_mode="mock",
+            )
+
+    app.dependency_overrides[get_helpdesk_orchestrator] = lambda: FakeOrchestrator()
+
+    settings = get_settings()
+    original_secret = settings.evolution_webhook_secret
+    original_allow_query = settings.evolution_webhook_allow_query_secret
+    settings.evolution_webhook_secret = "segredo-evolution"
+    settings.evolution_webhook_allow_query_secret = True
+
+    try:
+        response = test_client.post(
+            "/api/v1/webhooks/whatsapp/evolution?secret=segredo-evolution",
+            json={
+                "event": "MESSAGES_UPSERT",
+                "data": {
+                    "key": {
+                        "remoteJid": "5521972008679@s.whatsapp.net",
+                        "fromMe": False,
+                        "id": "EVO-QUERY-555",
+                    },
+                    "pushName": "Paula Almeida",
+                    "message": {"conversation": "/me"},
+                    "messageType": "conversation",
+                },
+            },
+        )
+    finally:
+        settings.evolution_webhook_secret = original_secret
+        settings.evolution_webhook_allow_query_secret = original_allow_query
         app.dependency_overrides.pop(get_helpdesk_orchestrator, None)
 
     assert response.status_code == 202
@@ -302,7 +350,7 @@ def test_receive_evolution_webhook_acks_unknown_glpi_identity_without_reply() ->
 
     try:
         response = test_client.post(
-            "/api/v1/webhooks/whatsapp/evolution?secret=segredo-evolution",
+            "/api/v1/webhooks/whatsapp/evolution",
             json={
                 "event": "MESSAGES_UPSERT",
                 "data": {
@@ -316,6 +364,7 @@ def test_receive_evolution_webhook_acks_unknown_glpi_identity_without_reply() ->
                     "messageType": "conversation",
                 },
             },
+            headers={"X-Evolution-Webhook-Secret": "segredo-evolution"},
         )
     finally:
         settings.evolution_webhook_secret = original_secret

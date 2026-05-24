@@ -47,6 +47,7 @@ def isolate_test_settings() -> None:
         "evolution_api_key": settings.evolution_api_key,
         "evolution_instance_name": settings.evolution_instance_name,
         "evolution_webhook_secret": settings.evolution_webhook_secret,
+        "evolution_webhook_allow_query_secret": settings.evolution_webhook_allow_query_secret,
         "operational_postgres_dsn": settings.operational_postgres_dsn,
         "operational_postgres_schema": settings.operational_postgres_schema,
         "operational_audit_retention_days": settings.operational_audit_retention_days,
@@ -101,6 +102,7 @@ def isolate_test_settings() -> None:
     settings.evolution_api_key = None
     settings.evolution_instance_name = None
     settings.evolution_webhook_secret = None
+    settings.evolution_webhook_allow_query_secret = False
     settings.operational_postgres_dsn = None
     settings.operational_postgres_schema = "helpdesk_platform"
     settings.operational_audit_retention_days = 30

@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     evolution_api_key: str | None = None
     evolution_instance_name: str | None = None
     evolution_webhook_secret: str | None = None
+    evolution_webhook_allow_query_secret: bool = False
     evolution_lid_phone_map: dict[str, str] = {}
 
     operational_postgres_dsn: str | None = None
