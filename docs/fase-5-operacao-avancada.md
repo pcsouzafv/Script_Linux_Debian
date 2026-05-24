@@ -205,6 +205,14 @@ Nao ha ainda base de conhecimento indexada, `RAG`, indice vetorial nem servico p
 2. Implementar `RAG` para consulta controlada.
 3. Gerar pos-mortem semi-automatico com base em ticket, auditoria e solution.
 
+### Bloco 5: preparar governanca operacional do NOC
+
+1. Mapear POPs, Instrucoes Tecnicas, filas, categorias, servicos e responsaveis.
+2. Criar base para relatorios consolidados do NOC, incluindo incidentes, problemas, demandas, mudancas, alertas e indicadores.
+3. Criar modelo de avaliacao de assertividade de alertas e qualidade de monitoracao.
+4. Definir integracao entre incidentes recorrentes, problemas, demandas e mudancas.
+5. Preparar os dados para indicadores de pessoas, processos, produtividade, capacitacao e aderencia operacional.
+
 ## Criterios de saida da Fase 5
 
 Considere a Fase 5 fechada quando estes pontos estiverem juntos:
@@ -221,3 +229,7 @@ Considere a Fase 5 fechada quando estes pontos estiverem juntos:
 - dados operacionais: ja sustentam a fase;
 - inteligencia operacional agregada: ainda incompleta;
 - fase atual: pronta para continuar, mas nao pronta para ser considerada concluida.
+
+## Proxima frente relacionada
+
+Depois de consolidar a Fase 5, a evolucao natural e a frente de governanca operacional descrita em [Evolucao NOC, ITSM e operacao padronizada](evolucao-noc-operacao.md).

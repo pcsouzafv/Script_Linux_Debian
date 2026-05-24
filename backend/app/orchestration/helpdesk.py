@@ -13,6 +13,12 @@ from app.schemas.helpdesk import (
     CorrelationResponse,
     IdentityLookupResponse,
     MassIncidentCandidateResponse,
+    NOCActionItemResponse,
+    NOCAlertReviewItemRequest,
+    NOCAlertClassificationResponse,
+    NOCAlertReviewRequest,
+    NOCAlertReviewResponse,
+    NOCOperationalReportResponse,
     NormalizedWhatsAppMessage,
     OperationalAssistantResponse,
     RequesterIdentity,
@@ -999,6 +1005,385 @@ class HelpdeskOrchestrator:
             ),
             notes=summary.notes,
         )
+
+    async def get_noc_operational_report(
+        self,
+        period_label: str = "periodo atual",
+    ) -> NOCOperationalReportResponse:
+        ticket_summary = await self.get_ticket_operations_summary()
+        automation_summary = await self.get_automation_summary()
+        action_items = self._build_noc_action_items(ticket_summary, automation_summary)
+        operational_risks = self._build_noc_operational_risks(
+            ticket_summary,
+            automation_summary,
+        )
+        agenda = self._build_incident_meeting_agenda(ticket_summary, action_items)
+
+        executive_summary = (
+            f"NOC com {ticket_summary.unresolved_backlog_count} ticket(s) em backlog, "
+            f"{ticket_summary.high_priority_backlog_count} de alta criticidade, "
+            f"{ticket_summary.mass_incident_candidate_count} agrupamento(s) candidato(s) "
+            f"a incidente em massa e {automation_summary.total_jobs} job(s) de automacao "
+            "no periodo analisado."
+        )
+        if operational_risks:
+            executive_summary = f"{executive_summary} Riscos principais: {operational_risks[0]}"
+
+        return NOCOperationalReportResponse(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            period_label=period_label.strip() or "periodo atual",
+            executive_summary=executive_summary,
+            ticket_operations=ticket_summary,
+            automation=automation_summary,
+            action_items=action_items,
+            incident_meeting_agenda=agenda,
+            operational_risks=operational_risks,
+            notes=[
+                *ticket_summary.notes,
+                *automation_summary.notes,
+                "Relatorio consolidado gerado a partir de snapshots analiticos, auditoria operacional e fila de automacao.",
+            ],
+        )
+
+    async def review_noc_alerts(
+        self,
+        payload: NOCAlertReviewRequest,
+    ) -> NOCAlertReviewResponse:
+        classifications = [
+            self._classify_noc_alert(alert)
+            for alert in payload.alerts
+        ]
+        classification_counts: dict[str, int] = {}
+        for item in classifications:
+            classification_counts[item.classification] = (
+                classification_counts.get(item.classification, 0) + 1
+            )
+
+        average_assertiveness = 0.0
+        if classifications:
+            average_assertiveness = round(
+                sum(item.assertiveness_percent for item in classifications)
+                / len(classifications),
+                2,
+            )
+
+        action_items = self._build_alert_review_action_items(classifications)
+        notes = ["Revisao heuristica executada com base nos metadados enviados."]
+        if not classifications:
+            notes.append("Nenhum alerta informado para classificacao.")
+
+        return NOCAlertReviewResponse(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            period_label=payload.period_label,
+            total_alerts=len(classifications),
+            classification_counts=classification_counts,
+            average_assertiveness_percent=average_assertiveness,
+            alerts=classifications,
+            action_items=action_items,
+            notes=notes,
+        )
+
+    def _build_noc_action_items(
+        self,
+        ticket_summary: TicketOperationsSummaryResponse,
+        automation_summary: AutomationSummaryResponse,
+    ) -> list[NOCActionItemResponse]:
+        action_items: list[NOCActionItemResponse] = []
+
+        if ticket_summary.mass_incident_candidate_count > 0:
+            candidate = ticket_summary.mass_incident_candidates[0]
+            action_items.append(
+                NOCActionItemResponse(
+                    area="gestao_incidentes",
+                    priority=TicketPriority.CRITICAL,
+                    title="Avaliar incidente em massa candidato",
+                    recommendation=(
+                        "Abrir ou vincular incidente pai no ITSM e conduzir pauta na reuniao de Gestao de Incidentes."
+                    ),
+                    evidence=(
+                        f"{candidate.ticket_count} ticket(s) agrupados por {candidate.scope} em {candidate.label}."
+                    ),
+                    owner_hint=candidate.routed_to or "Supervisor NOC",
+                    due_hint="hoje",
+                )
+            )
+
+        if ticket_summary.unassigned_backlog_count > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="helpdesk",
+                    priority=TicketPriority.HIGH,
+                    title="Distribuir backlog sem responsavel",
+                    recommendation=(
+                        "Atribuir tickets sem dono e registrar primeira tratativa para reduzir aging operacional."
+                    ),
+                    evidence=f"{ticket_summary.unassigned_backlog_count} ticket(s) em backlog sem atribuicao.",
+                    owner_hint="Supervisor NOC",
+                    due_hint="proximo ciclo operacional",
+                )
+            )
+
+        if ticket_summary.high_priority_backlog_count > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="sla",
+                    priority=TicketPriority.HIGH,
+                    title="Revisar tickets de alta criticidade",
+                    recommendation=(
+                        "Validar severidade, comunicacao, escalonamento e risco de SLA para tickets high/critical."
+                    ),
+                    evidence=(
+                        f"{ticket_summary.high_priority_backlog_count} ticket(s) high/critical ainda nao resolvido(s)."
+                    ),
+                    owner_hint="Gestao de Incidentes",
+                    due_hint="8 x 5",
+                )
+            )
+
+        if (
+            ticket_summary.unresolved_backlog_count > 0
+            and ticket_summary.backlog_assignment_coverage_percent < 80
+        ):
+            action_items.append(
+                NOCActionItemResponse(
+                    area="processos",
+                    priority=TicketPriority.MEDIUM,
+                    title="Melhorar cobertura de atribuicao da fila",
+                    recommendation="Revisar roteamento, grupos responsaveis e regra de escalonamento inicial.",
+                    evidence=(
+                        f"Cobertura de atribuicao em {ticket_summary.backlog_assignment_coverage_percent}%."
+                    ),
+                    owner_hint="Dono do processo ITSM",
+                )
+            )
+
+        if (
+            ticket_summary.total_tickets > 0
+            and ticket_summary.average_correlation_event_count < 1
+        ):
+            action_items.append(
+                NOCActionItemResponse(
+                    area="monitoracao",
+                    priority=TicketPriority.MEDIUM,
+                    title="Aumentar correlacao entre tickets e eventos",
+                    recommendation=(
+                        "Revisar tags, servicos, ativos e regra de integracao entre monitoracao e ITSM."
+                    ),
+                    evidence=(
+                        "Media de eventos correlacionados por ticket abaixo de 1.0 "
+                        f"({ticket_summary.average_correlation_event_count})."
+                    ),
+                    owner_hint="Monitoracao",
+                )
+            )
+
+        if automation_summary.dead_letter_queue_depth > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="automacao",
+                    priority=TicketPriority.HIGH,
+                    title="Tratar automacoes em dead-letter",
+                    recommendation=(
+                        "Analisar erros, corrigir pre-condicoes e decidir reprocessamento ou cancelamento."
+                    ),
+                    evidence=f"{automation_summary.dead_letter_queue_depth} job(s) na dead-letter queue.",
+                    owner_hint="Administrador da plataforma",
+                    due_hint="hoje",
+                )
+            )
+
+        if automation_summary.queue_depth > 10:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="automacao",
+                    priority=TicketPriority.MEDIUM,
+                    title="Verificar profundidade da fila de automacao",
+                    recommendation=(
+                        "Avaliar capacidade do worker, retries e aprovacao pendente antes de ampliar uso operacional."
+                    ),
+                    evidence=f"{automation_summary.queue_depth} job(s) aguardando processamento.",
+                    owner_hint="Administrador da plataforma",
+                )
+            )
+
+        return action_items
+
+    def _build_noc_operational_risks(
+        self,
+        ticket_summary: TicketOperationsSummaryResponse,
+        automation_summary: AutomationSummaryResponse,
+    ) -> list[str]:
+        risks: list[str] = []
+        if ticket_summary.mass_incident_candidate_count > 0:
+            risks.append("ha agrupamentos de tickets que podem indicar incidente em massa")
+        if ticket_summary.high_priority_backlog_count > 0:
+            risks.append("existem tickets high/critical ainda nao resolvidos")
+        if ticket_summary.unassigned_backlog_count > 0:
+            risks.append("ha backlog sem responsavel atribuido")
+        if automation_summary.dead_letter_queue_depth > 0:
+            risks.append("ha automacoes em dead-letter que exigem decisao operacional")
+        if not risks:
+            risks.append("nenhum risco operacional critico foi detectado pelas heuristicas atuais")
+        return risks
+
+    def _build_incident_meeting_agenda(
+        self,
+        ticket_summary: TicketOperationsSummaryResponse,
+        action_items: list[NOCActionItemResponse],
+    ) -> list[str]:
+        agenda = [
+            "Revisar incidentes high/critical abertos e em risco de SLA.",
+            "Validar tickets sem atribuicao e responsaveis por fila.",
+            "Revisar recorrencias por servico, ativo, categoria e causa raiz.",
+            "Confirmar comunicacoes realizadas para equipes impactadas.",
+            "Definir acoes preventivas, demandas e mudancas relacionadas.",
+        ]
+        if ticket_summary.mass_incident_candidate_count > 0:
+            agenda.insert(0, "Decidir abertura ou vinculacao de incidente pai para agrupamentos candidatos.")
+        if any(item.area == "monitoracao" for item in action_items):
+            agenda.append("Priorizar revisao de alertas, tags e correlacao monitoracao-ITSM.")
+        return agenda
+
+    def _classify_noc_alert(
+        self,
+        alert: NOCAlertReviewItemRequest,
+    ) -> NOCAlertClassificationResponse:
+        missing_fields = self._missing_alert_fields(alert)
+        evidence: list[str] = []
+        if missing_fields:
+            evidence.append(f"Campos obrigatorios ausentes: {', '.join(missing_fields)}.")
+
+        if alert.duplicate_of:
+            classification = "redundante"
+            recommended_action = "Consolidar com o alerta principal ou desativar com aprovacao."
+            evidence.append(f"Marcado como duplicado de {alert.duplicate_of}.")
+        elif missing_fields:
+            classification = "incompleto"
+            recommended_action = "Completar metadados, dono, runbook, recuperacao e regra ITSM."
+        elif alert.event_count > 0 and alert.incident_count == 0:
+            classification = "ruidoso"
+            recommended_action = "Ajustar expressao, janela, dependencia, severidade ou supressao."
+            evidence.append("Alerta possui eventos sem incidentes relacionados.")
+        elif self._false_positive_rate(alert) >= 60:
+            classification = "ruidoso"
+            recommended_action = "Revisar threshold e dependencia; validar com historico de incidentes."
+            evidence.append(f"Taxa de falso positivo em {self._false_positive_rate(alert)}%.")
+        else:
+            classification = "assertivo"
+            recommended_action = "Manter ativo, garantir POP/runbook e acompanhar tendencia."
+            evidence.append("Metadados minimos presentes e relacao operacional aceitavel.")
+
+        assertiveness = self._alert_assertiveness_percent(alert, classification, missing_fields)
+
+        return NOCAlertClassificationResponse(
+            alert_name=alert.alert_name,
+            service_name=alert.service_name,
+            asset_name=alert.asset_name,
+            severity=alert.severity,
+            classification=classification,
+            assertiveness_percent=assertiveness,
+            recommended_action=recommended_action,
+            missing_fields=missing_fields,
+            evidence=evidence,
+        )
+
+    def _missing_alert_fields(
+        self,
+        alert: NOCAlertReviewItemRequest,
+    ) -> list[str]:
+        missing: list[str] = []
+        required_values = {
+            "service_name_or_asset_name": alert.service_name or alert.asset_name,
+            "severity": alert.severity,
+            "responsible_group": alert.responsible_group,
+            "runbook": alert.runbook,
+            "trigger_expression": alert.trigger_expression,
+            "recovery_criteria": alert.recovery_criteria,
+        }
+        for field_name, value in required_values.items():
+            if not str(value or "").strip():
+                missing.append(field_name)
+        if not alert.has_itsm_rule:
+            missing.append("itsm_rule")
+        return missing
+
+    def _false_positive_rate(
+        self,
+        alert: NOCAlertReviewItemRequest,
+    ) -> float:
+        if alert.event_count <= 0:
+            return 0.0
+        return round((alert.false_positive_count / alert.event_count) * 100, 2)
+
+    def _alert_assertiveness_percent(
+        self,
+        alert: NOCAlertReviewItemRequest,
+        classification: str,
+        missing_fields: list[str],
+    ) -> float:
+        if alert.event_count <= 0:
+            base = 50.0
+        else:
+            valid_events = max(0, alert.event_count - alert.false_positive_count)
+            base = round((valid_events / alert.event_count) * 100, 2)
+
+        base -= len(missing_fields) * 8
+        if classification == "redundante":
+            base -= 25
+        elif classification == "incompleto":
+            base -= 15
+        elif classification == "ruidoso":
+            base -= 10
+
+        return round(min(100.0, max(0.0, base)), 2)
+
+    def _build_alert_review_action_items(
+        self,
+        classifications: list[NOCAlertClassificationResponse],
+    ) -> list[NOCActionItemResponse]:
+        counts: dict[str, int] = {}
+        for item in classifications:
+            counts[item.classification] = counts.get(item.classification, 0) + 1
+
+        action_items: list[NOCActionItemResponse] = []
+        if counts.get("ruidoso", 0) > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="monitoracao",
+                    priority=TicketPriority.HIGH,
+                    title="Reduzir alertas ruidosos",
+                    recommendation=(
+                        "Revisar thresholds, dependencias, janelas e severidades dos alertas classificados como ruidosos."
+                    ),
+                    evidence=f"{counts['ruidoso']} alerta(s) com baixa assertividade operacional.",
+                    owner_hint="Monitoracao",
+                )
+            )
+        if counts.get("redundante", 0) > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="monitoracao",
+                    priority=TicketPriority.MEDIUM,
+                    title="Consolidar alertas redundantes",
+                    recommendation="Desativar ou agrupar duplicidades apos aprovacao e registro de mudanca.",
+                    evidence=f"{counts['redundante']} alerta(s) redundante(s).",
+                    owner_hint="Monitoracao",
+                )
+            )
+        if counts.get("incompleto", 0) > 0:
+            action_items.append(
+                NOCActionItemResponse(
+                    area="processos",
+                    priority=TicketPriority.MEDIUM,
+                    title="Completar governanca dos alertas",
+                    recommendation=(
+                        "Preencher dono, runbook, criterio de recuperacao, tags e regra ITSM antes de considerar produtivo."
+                    ),
+                    evidence=f"{counts['incompleto']} alerta(s) sem campos obrigatorios.",
+                    owner_hint="Dono do processo NOC",
+                )
+            )
+        return action_items
 
     async def process_whatsapp_webhook_messages(
         self,
@@ -2092,9 +2477,9 @@ class HelpdeskOrchestrator:
             f"Melhor próximo passo agora: {next_step}",
         ]
         if triage.resolution_hints:
-            parts.append(f"Tentativa segura sugerida: {triage.resolution_hints[0]}")
+            parts.append(f"Sugestao de resolucao: {triage.resolution_hints[0]}")
         if triage.similar_incidents:
-            parts.append(f"Referencia parecida: {triage.similar_incidents[0]}")
+            parts.append(f"Caso semelhante: {triage.similar_incidents[0]}")
         parts.append("Se quiser registrar um novo chamado, use /open <descrição>.")
         parts.append("Se preferir, envie /help para ver os comandos disponíveis.")
         return "\n".join(parts)

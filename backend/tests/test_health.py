@@ -277,6 +277,127 @@ def test_ticket_operations_summary_route_returns_mass_incident_candidates() -> N
     assert candidate["notes"]
 
 
+def test_noc_operational_report_requires_audit_and_automation_read_scope() -> None:
+    response = client.get(
+        "/api/v1/helpdesk/noc/report",
+        headers=AUDIT_HEADERS,
+    )
+
+    assert response.status_code == 401
+    assert "leitura administrativa de automação" in response.json()["detail"].lower()
+
+
+def test_noc_operational_report_returns_actions_and_meeting_agenda() -> None:
+    store = TicketAnalyticsStore(get_settings())
+    now = datetime.now(timezone.utc)
+
+    asyncio.run(
+        store.upsert_snapshot(
+            TicketAnalyticsSnapshotRecord(
+                ticket_id="701",
+                subject="VPN indisponivel para diretoria",
+                description="Incidente critico reportado pela operacao.",
+                status="new",
+                priority="critical",
+                requester_glpi_user_id=31,
+                assigned_glpi_user_id=None,
+                external_id="helpdesk-api-701",
+                request_type_id=1,
+                request_type_name="Direct",
+                category_id=9,
+                category_name="Rede",
+                asset_name="vpn-edge-01",
+                service_name="vpn-corporativa",
+                source_channel="api",
+                routed_to="NOC-Critico",
+                correlation_event_count=0,
+                source_updated_at=now - timedelta(minutes=20),
+            )
+        )
+    )
+
+    response = client.get(
+        "/api/v1/helpdesk/noc/report?period_label=semana%20atual",
+        headers=RUNTIME_OVERVIEW_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["period_label"] == "semana atual"
+    assert "NOC com" in body["executive_summary"]
+    assert body["ticket_operations"]["unresolved_backlog_count"] >= 1
+    assert body["action_items"]
+    assert any(item["area"] in {"helpdesk", "sla", "monitoracao"} for item in body["action_items"])
+    assert body["incident_meeting_agenda"]
+    assert body["operational_risks"]
+
+
+def test_noc_alert_review_classifies_alert_quality() -> None:
+    response = client.post(
+        "/api/v1/helpdesk/noc/alerts/review",
+        headers=AUDIT_HEADERS,
+        json={
+            "period_label": "maio 2026",
+            "alerts": [
+                {
+                    "alert_name": "ERP HTTP 5xx alto",
+                    "service_name": "erp",
+                    "severity": "high",
+                    "responsible_group": "NOC-Critico",
+                    "runbook": "POP-ERP-HTTP",
+                    "trigger_expression": "5xx > 5%",
+                    "recovery_criteria": "5xx < 1%",
+                    "has_itsm_rule": True,
+                    "event_count": 10,
+                    "incident_count": 8,
+                    "false_positive_count": 1,
+                },
+                {
+                    "alert_name": "CPU alta transitoria",
+                    "asset_name": "app-01",
+                    "severity": "warning",
+                    "responsible_group": "Monitoracao",
+                    "runbook": "IT-CPU",
+                    "trigger_expression": "cpu > 80",
+                    "recovery_criteria": "cpu < 70",
+                    "has_itsm_rule": True,
+                    "event_count": 20,
+                    "incident_count": 0,
+                    "false_positive_count": 15,
+                },
+                {
+                    "alert_name": "Disco cheio duplicado",
+                    "asset_name": "db-01",
+                    "severity": "high",
+                    "responsible_group": "Banco",
+                    "runbook": "POP-DISCO",
+                    "trigger_expression": "disk > 90",
+                    "recovery_criteria": "disk < 80",
+                    "has_itsm_rule": True,
+                    "event_count": 4,
+                    "incident_count": 4,
+                    "false_positive_count": 0,
+                    "duplicate_of": "Disco cheio principal",
+                },
+                {
+                    "alert_name": "Alerta sem governanca",
+                    "event_count": 1,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_alerts"] == 4
+    assert body["classification_counts"]["assertivo"] == 1
+    assert body["classification_counts"]["ruidoso"] == 1
+    assert body["classification_counts"]["redundante"] == 1
+    assert body["classification_counts"]["incompleto"] == 1
+    assert body["average_assertiveness_percent"] > 0
+    assert len(body["action_items"]) == 3
+
+
 def test_runtime_overview_route_requires_automation_read_scope_alongside_audit_scope() -> None:
     response = client.get(
         "/api/v1/helpdesk/runtime/overview",
@@ -739,7 +860,13 @@ def test_ops_dashboard_page_is_available_for_browser_access() -> None:
     assert response.status_code == 200
     assert "Painel operacional do orquestrador" in response.text
     assert "/api/v1/helpdesk/runtime/overview" in response.text
+    assert "/api/v1/helpdesk/agent/investigate" in response.text
+    assert "Agente LangGraph" in response.text
+    assert "Investigar" in response.text
     assert "Containers Docker" in response.text
+    assert "function escapeHtml" in response.text
+    assert "sessionStorage.setItem(storageKeys.audit" not in response.text
+    assert "sessionStorage.setItem(storageKeys.automation" not in response.text
 
 
 def test_automation_route_rejects_api_token_without_dedicated_automation_token() -> None:

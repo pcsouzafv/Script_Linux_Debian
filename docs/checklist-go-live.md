@@ -73,6 +73,45 @@ Marcar o que entra nesta liberacao:
 - Time sabe que o telefone do usuario precisa existir no `GLPI`.
 - Procedimento de contingencia comunicado.
 
+## Checklist de prontidao operacional do NOC
+
+- POPs criticos revisados, aprovados e versionados.
+- Instrucoes Tecnicas criticas revisadas, aprovadas e versionadas.
+- Matriz de responsaveis por fila, sistema, severidade e horario definida.
+- Procedimento de abertura, triagem, escalonamento, solucao e fechamento validado.
+- Criterios de registro de tratativas no historico do ITSM comunicados.
+- Processo de comunicacao com equipes impactadas definido.
+- Fluxo de incidentes e problemas validado no ITSM adotado pelo ambiente.
+- Pauta da reuniao semanal de Gestao de Incidentes publicada.
+- Relatorio semanal do NOC com modelo aprovado.
+- Relatorio executivo mensal com modelo aprovado.
+- Trilhas de capacitacao de Help Desk, incidentes, problemas e monitoracao definidas.
+- Evidencias de treinamento dos operadores do piloto registradas.
+
+## Checklist de monitoracao e alertas
+
+- Alertas criticos revisados quanto a assertividade.
+- Alertas ruidosos, redundantes ou sem dono mapeados.
+- Triggers do Zabbix com severidade, tags, grupo responsavel e acao esperada.
+- Runbook ou POP associado aos alertas criticos.
+- Dashboards tecnicos do Zabbix ou Grafana revisados.
+- Dashboard executivo publicado ou planejado com data e responsavel.
+- Monitoracoes redundantes revisadas para evitar falsos positivos.
+- Lacunas de monitoracao identificadas a partir de incidentes recorrentes.
+- Regras de correlacao entre eventos e tickets validadas.
+- Escopo de acompanhamento 8 x 5 definido para incidentes em tempo real.
+
+## Checklist de demandas, mudancas e auditoria
+
+- Fluxo de demandas no Azure DevOps definido.
+- Criterio de precificacao por esforco, risco, urgencia, beneficio e recorrencia definido.
+- Mudancas com impacto no NOC possuem aprovador, janela e rollback.
+- Comunicacao de mudanca para equipes impactadas validada.
+- Configuracoes criticas de Zabbix, Grafana, backend e playbooks versionadas.
+- Backup de configuracoes criticas validado.
+- Auditoria de alteracoes criticas habilitada ou documentada.
+- Rotina de restauracao ou reversao testada para configuracoes principais.
+
 ## Criticos a acompanhar nas primeiras horas
 
 - falhas 401, 403, 404, 500 e 502 no backend
@@ -98,6 +137,10 @@ Horario real de ativacao:
 - consulta de ticket respondeu corretamente
 - logs ficaram estaveis na primeira hora
 - nenhuma autenticacao critica falhou
+- incidente critico possui POP, responsavel, comunicacao e registro no ITSM
+- alerta critico possui dono, severidade, runbook e criterio de escalonamento
+- relatorio operacional inicial do NOC foi gerado ou possui responsavel e data
+- mudancas da janela ficaram registradas com aprovador, evidencias e rollback
 
 ## Condicoes de rollback
 

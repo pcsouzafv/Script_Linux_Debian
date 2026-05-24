@@ -148,6 +148,7 @@ flowchart LR
 - [Catálogo inicial de automações e agentes](docs/automacoes-sugeridas.md)
 - [Dados do GLPI para Analytics e ML](docs/glpi-dados-analytics-ml.md)
 - [Autonomia com LangGraph em ambiente monitorado](docs/langgraph-autonomia-ambiente-monitorado.md)
+- [Evolucao NOC, ITSM e operacao padronizada](docs/evolucao-noc-operacao.md)
 - [Portas e conectividade](docs/portas-e-conectividade.md)
 - [Roadmap de implantação](docs/roadmap.md)
 - [Guia do backend MVP](backend/README.md)

@@ -146,7 +146,8 @@ Se ainda nao existir, primeiro crie ou conecte a instancia dedicada do helpdesk 
 ### Observacoes praticas
 
 - o backend exige `HELPDESK_EVOLUTION_WEBHOOK_SECRET` e valida o header `X-Evolution-Webhook-Secret`;
-- se a versao da Evolution nao repassar headers customizados, o backend tambem aceita o mesmo segredo em `?secret=...` no webhook;
+- por seguranca, segredo em query string fica desabilitado por padrao, pois URLs aparecem em logs e proxies;
+- se uma versao da Evolution nao repassar headers customizados, habilite temporariamente `HELPDESK_EVOLUTION_WEBHOOK_ALLOW_QUERY_SECRET=true` e use `?secret=...` apenas ate corrigir o caminho de headers.
 - em `auto`, se a Evolution estiver configurada, ela sera usada para envio antes da Meta;
 - se a Evolution entregar o remetente como `220095666237694@lid`, cadastre um mapa explicito em `HELPDESK_EVOLUTION_LID_PHONE_MAP`, por exemplo `{"220095666237694":"+5521972008679"}`;
 - `@lid` sem mapa explicito continua ignorado, para manter a regra de que apenas telefones cadastrados no GLPI podem acionar o assistente;

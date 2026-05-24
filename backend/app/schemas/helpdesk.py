@@ -461,6 +461,72 @@ class TicketOperationsSummaryResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class NOCActionItemResponse(BaseModel):
+    area: str
+    priority: TicketPriority
+    title: str
+    recommendation: str
+    evidence: str
+    owner_hint: str | None = None
+    due_hint: str | None = None
+
+
+class NOCOperationalReportResponse(BaseModel):
+    generated_at: str
+    period_label: str
+    executive_summary: str
+    ticket_operations: TicketOperationsSummaryResponse
+    automation: AutomationSummaryResponse
+    action_items: list[NOCActionItemResponse] = Field(default_factory=list)
+    incident_meeting_agenda: list[str] = Field(default_factory=list)
+    operational_risks: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class NOCAlertReviewItemRequest(BaseModel):
+    alert_name: str = Field(..., min_length=3, max_length=200)
+    service_name: str | None = Field(default=None, max_length=120)
+    asset_name: str | None = Field(default=None, max_length=120)
+    severity: str | None = Field(default=None, max_length=40)
+    responsible_group: str | None = Field(default=None, max_length=120)
+    runbook: str | None = Field(default=None, max_length=240)
+    trigger_expression: str | None = Field(default=None, max_length=500)
+    recovery_criteria: str | None = Field(default=None, max_length=240)
+    has_itsm_rule: bool = False
+    event_count: int = Field(default=0, ge=0)
+    incident_count: int = Field(default=0, ge=0)
+    false_positive_count: int = Field(default=0, ge=0)
+    duplicate_of: str | None = Field(default=None, max_length=200)
+
+
+class NOCAlertReviewRequest(BaseModel):
+    period_label: str = Field(default="periodo atual", min_length=3, max_length=120)
+    alerts: list[NOCAlertReviewItemRequest] = Field(default_factory=list, max_length=200)
+
+
+class NOCAlertClassificationResponse(BaseModel):
+    alert_name: str
+    service_name: str | None = None
+    asset_name: str | None = None
+    severity: str | None = None
+    classification: str
+    assertiveness_percent: float
+    recommended_action: str
+    missing_fields: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+
+
+class NOCAlertReviewResponse(BaseModel):
+    generated_at: str
+    period_label: str
+    total_alerts: int = 0
+    classification_counts: dict[str, int] = Field(default_factory=dict)
+    average_assertiveness_percent: float = 0.0
+    alerts: list[NOCAlertClassificationResponse] = Field(default_factory=list)
+    action_items: list[NOCActionItemResponse] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class RuntimeHealthResponse(BaseModel):
     status: str
     service: str
