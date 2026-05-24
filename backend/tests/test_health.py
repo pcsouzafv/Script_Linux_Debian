@@ -11,6 +11,7 @@ import app.services.operational_store as operational_store_module
 from app.core.config import get_settings
 from app.core.dependencies import get_glpi_client, get_zabbix_client
 from app.main import app
+from app.orchestration.helpdesk import PROCESSED_WHATSAPP_MESSAGE_IDS
 from app.services.docker_runtime import (
     DockerApplicationRecord,
     DockerContainerRecord,
@@ -2790,6 +2791,28 @@ def test_admin_freeform_message_uses_admin_operational_flow() -> None:
     assert body["assistant_result"]["flow_name"] == "admin_operations"
 
 
+def test_admin_greeting_uses_clean_operational_reply() -> None:
+    payload = {
+        "sender_phone": "+5511900019999",
+        "sender_name": "Ricardo Santana",
+        "text": "Olá",
+        "requester_role": "user",
+    }
+
+    response = client.post("/api/v1/webhooks/whatsapp/messages", json=payload)
+
+    assert response.status_code == 202
+    body = response.json()
+    reply_text = body["assistant_result"]["reply_text"]
+    assert body["outcome_type"] == "assistant"
+    assert body["requester_role"] == "admin"
+    assert "Olá, Ricardo" in reply_text
+    assert "Modo operacional ativo para administrador" in reply_text
+    assert "mensagem reescrita" not in reply_text.casefold()
+    assert "aqui está" not in reply_text.casefold()
+    assert "confirm" not in reply_text.casefold()
+
+
 def test_technician_command_returns_operational_result() -> None:
     payload = {
         "sender_phone": "+5511912345678",
@@ -2874,6 +2897,61 @@ def test_evolution_duplicate_entrar_message_is_ignored_after_first_reply() -> No
     assert second_body["interactions"] == []
     assert second_body["integration_mode"] == "noop"
     assert any("duplicada" in event for event in second_body["ignored_events"])
+
+
+def test_evolution_duplicate_content_is_ignored_even_with_new_message_id() -> None:
+    settings = get_settings()
+    original_secret = settings.evolution_webhook_secret
+    settings.evolution_webhook_secret = "segredo-evolution"
+    PROCESSED_WHATSAPP_MESSAGE_IDS.clear()
+
+    payload = {
+        "event": "MESSAGES_UPSERT",
+        "data": {
+            "key": {
+                "remoteJid": "5521972008679@s.whatsapp.net",
+                "fromMe": False,
+                "id": "EVO-DUP-CONTENT-001",
+            },
+            "pushName": "Paula Almeida",
+            "message": {"conversation": "/help"},
+            "messageType": "conversation",
+        },
+    }
+    duplicate_payload = {
+        **payload,
+        "data": {
+            **payload["data"],
+            "key": {
+                **payload["data"]["key"],
+                "id": "EVO-DUP-CONTENT-002",
+            },
+        },
+    }
+
+    try:
+        first_response = client.post(
+            "/api/v1/webhooks/whatsapp/evolution",
+            json=payload,
+            headers={"X-Evolution-Webhook-Secret": "segredo-evolution"},
+        )
+        second_response = client.post(
+            "/api/v1/webhooks/whatsapp/evolution",
+            json=duplicate_payload,
+            headers={"X-Evolution-Webhook-Secret": "segredo-evolution"},
+        )
+    finally:
+        settings.evolution_webhook_secret = original_secret
+        PROCESSED_WHATSAPP_MESSAGE_IDS.clear()
+
+    assert first_response.status_code == 202
+    assert len(first_response.json()["interactions"]) == 1
+
+    assert second_response.status_code == 202
+    second_body = second_response.json()
+    assert second_body["interactions"] == []
+    assert second_body["integration_mode"] == "noop"
+    assert any("conteúdo recente" in event for event in second_body["ignored_events"])
 
 
 def test_technician_ticket_command_reads_existing_ticket() -> None:
@@ -3016,6 +3094,58 @@ def test_technician_status_command_updates_allowed_status() -> None:
     assert body["command_result"]["ticket"]["status"] == "processing"
     assert body["command_result"]["resolution_advice"]["ticket_id"] == ticket_id
     assert "Sugestao:" in body["command_result"]["reply_text"]
+
+
+def test_technician_status_command_reads_status_when_no_new_status_is_sent() -> None:
+    create_payload = {
+        "subject": "Banco de dados lento",
+        "description": "Consultas do ERP estão demorando mais de trinta segundos.",
+        "category": "infra",
+        "asset_name": "db-prod-02",
+        "service_name": "postgresql",
+        "priority": "high",
+        "requester": {
+            "external_id": "user-201",
+            "display_name": "Marina Lopes",
+            "phone_number": "+5511933332222",
+            "role": "user",
+        },
+    }
+    ticket_id = client.post("/api/v1/helpdesk/tickets/open", json=create_payload).json()["ticket_id"]
+
+    response = client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5511912345678",
+            "sender_name": "Ana Souza",
+            "text": f"/status {ticket_id}",
+            "requester_role": "user",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["command_result"]["command_name"] == "status"
+    assert body["command_result"]["status"] == "completed"
+    assert body["command_result"]["ticket"]["ticket_id"] == ticket_id
+    assert body["command_result"]["ticket"]["status"] == MOCK_TICKET_STORE[ticket_id].status
+    assert "Status atual do ticket" in body["command_result"]["reply_text"]
+    assert "Uso:" not in body["command_result"]["reply_text"]
+
+    alias_response = client.post(
+        "/api/v1/webhooks/whatsapp/messages",
+        json={
+            "sender_phone": "+5511912345678",
+            "sender_name": "Ana Souza",
+            "text": f"/status {ticket_id} status",
+            "requester_role": "user",
+        },
+    )
+
+    assert alias_response.status_code == 202
+    alias_body = alias_response.json()
+    assert alias_body["command_result"]["ticket"]["status"] == MOCK_TICKET_STORE[ticket_id].status
+    assert "Status inválido" not in alias_body["command_result"]["reply_text"]
 
 
 def test_technician_status_solved_records_solution_and_notifies_requester() -> None:

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import hashlib
 
 from app.schemas.helpdesk import (
     AutomationJobCreateRequest,
@@ -83,6 +84,26 @@ OPERATOR_COMMAND_ALIASES: dict[str, str] = {
     "iniciar": "help",
     "inicio": "help",
     "start": "help",
+}
+STATUS_QUERY_ALIASES = {"atual", "consulta", "consultar", "current", "status", "ver"}
+OPERATOR_GREETING_MESSAGES = {
+    "bom dia",
+    "boa noite",
+    "boa tarde",
+    "hello",
+    "hi",
+    "ola",
+    "olá",
+    "oi",
+}
+LLM_OPERATOR_REPLY_FORBIDDEN_MARKERS = {
+    "aqui está",
+    "mensagem base",
+    "mensagem reescrita",
+    "prompt",
+    "reescreva",
+    "reescrevi",
+    "reescrita",
 }
 
 OPERATIONAL_ROLES = {
@@ -1396,13 +1417,17 @@ class HelpdeskOrchestrator:
         now = datetime.now(timezone.utc)
         self._purge_processed_whatsapp_message_ids(now)
         for message in messages:
-            dedup_key = self._whatsapp_message_dedup_key(message)
-            if dedup_key and dedup_key in PROCESSED_WHATSAPP_MESSAGE_IDS:
+            dedup_keys = self._whatsapp_message_dedup_keys(message)
+            matched_dedup_key = next(
+                (key for key in dedup_keys if key in PROCESSED_WHATSAPP_MESSAGE_IDS),
+                None,
+            )
+            if matched_dedup_key:
                 ignored_events.append(
-                    f"Mensagem duplicada ignorada: {message.external_message_id}."
+                    self._build_whatsapp_duplicate_note(message, matched_dedup_key)
                 )
                 continue
-            if dedup_key:
+            for dedup_key in dedup_keys:
                 PROCESSED_WHATSAPP_MESSAGE_IDS[dedup_key] = now
             try:
                 response = await self.process_whatsapp_message(message)
@@ -1412,7 +1437,7 @@ class HelpdeskOrchestrator:
                 )
                 continue
             except Exception:
-                if dedup_key:
+                for dedup_key in dedup_keys:
                     PROCESSED_WHATSAPP_MESSAGE_IDS.pop(dedup_key, None)
                 raise
             interactions.append(response)
@@ -1439,10 +1464,25 @@ class HelpdeskOrchestrator:
     ) -> WhatsAppWebhookProcessingResponse:
         return await self.process_whatsapp_webhook_messages(messages, ignored_events)
 
-    def _whatsapp_message_dedup_key(self, message: NormalizedWhatsAppMessage) -> str | None:
-        if not message.external_message_id:
-            return None
-        return f"{message.sender_phone}:{message.external_message_id}"
+    def _whatsapp_message_dedup_keys(self, message: NormalizedWhatsAppMessage) -> list[str]:
+        keys: list[str] = []
+        if message.external_message_id:
+            keys.append(f"id:{message.sender_phone}:{message.external_message_id}")
+
+        normalized_text = " ".join(message.text.casefold().split())
+        if normalized_text:
+            digest = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()[:20]
+            keys.append(f"content:{message.sender_phone}:{digest}")
+        return keys
+
+    def _build_whatsapp_duplicate_note(
+        self,
+        message: NormalizedWhatsAppMessage,
+        dedup_key: str,
+    ) -> str:
+        if dedup_key.startswith("content:"):
+            return "Mensagem duplicada ignorada: conteúdo recente já processado."
+        return f"Mensagem duplicada ignorada: {message.external_message_id}."
 
     def _purge_processed_whatsapp_message_ids(self, now: datetime) -> None:
         expired_before = now - WHATSAPP_MESSAGE_DEDUP_TTL
@@ -1540,6 +1580,29 @@ class HelpdeskOrchestrator:
         message: NormalizedWhatsAppMessage,
         requester: RequesterIdentity,
     ) -> OperationalAssistantResponse:
+        available_commands = self._available_command_docs(requester.role)
+        if self._is_greeting_only(message.text):
+            return OperationalAssistantResponse(
+                role=requester.role,
+                flow_name=self._flow_name_for_role(requester.role),
+                reply_text=self._build_operator_greeting_reply(requester),
+                triage=TicketTriageResponse(
+                    suggested_priority=TicketPriority.MEDIUM,
+                    resolved_priority=TicketPriority.MEDIUM,
+                    suggested_queue="NOC-Operacional",
+                    confidence="low",
+                    summary="Saudacao operacional sem incidente informado.",
+                    next_steps=["Use /help para comandos ou /open <descrição> para abrir chamado."],
+                    mode="local",
+                    notes=["Saudacao simples respondida sem acionar LLM ou abrir chamado."],
+                ),
+                available_commands=available_commands,
+                notes=[
+                    f"Fluxo operacional aplicado para o papel {requester.role.value}.",
+                    "Saudacao simples respondida sem triagem operacional detalhada.",
+                ],
+            )
+
         triage = await self.triage_ticket(
             TicketTriageRequest(
                 subject=self._build_subject_from_text(message.text, prefix="Operacional WhatsApp"),
@@ -1556,7 +1619,6 @@ class HelpdeskOrchestrator:
                 requester_team=requester.team,
             )
         )
-        available_commands = self._available_command_docs(requester.role)
         reply_text, reply_notes = await self._compose_operator_assistant_reply(
             role=requester.role,
             triage=triage,
@@ -1596,6 +1658,8 @@ class HelpdeskOrchestrator:
             "Reescreva a mensagem base abaixo para WhatsApp com tom humano, cordial e profissional. "
             "Preserve exatamente comandos com '/', filas, status e fatos tecnicos. "
             "Nao invente informacoes, nao prometa execucao automatica e nao remova alertas de seguranca. "
+            "Responda apenas com a mensagem final ao usuario. "
+            "Nao diga que reescreveu, revisou, melhorou ou formatou a mensagem. "
             "Responda com no maximo 6 linhas.\n\n"
             f"Papel operacional: {role.value}\n"
             f"Resumo da triagem: {triage.summary}\n"
@@ -1611,7 +1675,8 @@ class HelpdeskOrchestrator:
                 user_prompt=prompt,
                 system_prompt=(
                     "Voce melhora a redacao de um assistente virtual de helpdesk. "
-                    "Seja natural, claro e confiavel sem perder objetividade."
+                    "Seja natural, claro e confiavel sem perder objetividade. "
+                    "Nunca inclua prefacios como 'aqui esta' ou 'mensagem reescrita'."
                 ),
                 max_tokens=220,
                 temperature=0.3,
@@ -1619,10 +1684,53 @@ class HelpdeskOrchestrator:
         except IntegrationError:
             return base_reply, []
 
-        refined_reply = result.content.strip()
+        refined_reply = self._sanitize_operator_llm_reply(result.content)
         if not refined_reply:
-            return base_reply, []
+            return base_reply, [
+                "IA retornou resposta operacional fora do contrato; mantida mensagem padrao."
+            ]
         return refined_reply, [f"Resposta operacional refinada pela IA ({result.provider})."]
+
+    def _is_greeting_only(self, text: str) -> bool:
+        normalized = text.strip().casefold().strip(" !?.;,:\n\t")
+        normalized = " ".join(normalized.split())
+        return normalized in OPERATOR_GREETING_MESSAGES
+
+    def _build_operator_greeting_reply(self, requester: RequesterIdentity) -> str:
+        first_name = (requester.display_name or requester.external_id or "").strip().split(" ")[0]
+        greeting_target = f", {first_name}" if first_name else ""
+        return (
+            f"Olá{greeting_target}. Modo operacional ativo para "
+            f"{self._role_display_name(requester.role)}.\n"
+            "Use /help para ver os comandos disponíveis.\n"
+            "Para abrir chamado: /open <descrição>."
+        )
+
+    def _sanitize_operator_llm_reply(self, content: str) -> str | None:
+        text = content.strip()
+        if not text:
+            return None
+
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+
+        lines = [line.strip() for line in text.splitlines()]
+        while lines and self._is_operator_llm_meta_line(lines[0]):
+            lines.pop(0)
+        text = "\n".join(line for line in lines if line).strip().strip('"').strip("'")
+
+        lowered = text.casefold()
+        if not text or len(text) > 1200:
+            return None
+        if any(marker in lowered for marker in LLM_OPERATOR_REPLY_FORBIDDEN_MARKERS):
+            return None
+        return text
+
+    def _is_operator_llm_meta_line(self, line: str) -> bool:
+        normalized = line.strip().casefold().strip(" :.-")
+        if not normalized:
+            return True
+        return any(marker in normalized for marker in LLM_OPERATOR_REPLY_FORBIDDEN_MARKERS)
 
     async def _run_operator_command(
         self,
@@ -1907,16 +2015,37 @@ class HelpdeskOrchestrator:
 
         if command_name == "status":
             status_parts = text.split(maxsplit=2)
-            if len(status_parts) < 3:
+            if len(status_parts) < 2:
                 return TechnicianCommandResponse(
                     command_name="status",
                     status="invalid",
                     operation_mode="local",
-                    reply_text="Uso: /status <ticket_id> <new|processing|planned|waiting|solved|closed>",
-                    notes=["Comando status recebido sem ticket ou status alvo."],
+                    reply_text="Uso: /status <ticket_id> [new|processing|planned|waiting|solved|closed]",
+                    notes=["Comando status recebido sem ticket."],
                 )
 
             ticket_id = status_parts[1].strip()
+            if len(status_parts) == 2 or status_parts[2].strip().lower() in STATUS_QUERY_ALIASES:
+                try:
+                    ticket = await self.get_ticket(ticket_id)
+                except ResourceNotFoundError:
+                    return TechnicianCommandResponse(
+                        command_name="status",
+                        status="not-found",
+                        operation_mode="local",
+                        reply_text=f"Ticket {ticket_id} não encontrado para consulta de status.",
+                        notes=["Consulta de status não executada porque o ticket não existe."],
+                    )
+
+                return TechnicianCommandResponse(
+                    command_name="status",
+                    status="completed",
+                    operation_mode=ticket.integration_mode,
+                    reply_text=self._build_operator_ticket_status_reply(ticket),
+                    ticket=ticket,
+                    notes=["Status do ticket consultado sem alterar o chamado."],
+                )
+
             status_name = status_parts[2].strip().lower()
             if status_name not in PRIVILEGED_ALLOWED_STATUSES:
                 return TechnicianCommandResponse(
@@ -2484,6 +2613,21 @@ class HelpdeskOrchestrator:
         parts.append("Se preferir, envie /help para ver os comandos disponíveis.")
         return "\n".join(parts)
 
+    def _build_operator_ticket_status_reply(self, ticket: TicketDetailsResponse) -> str:
+        updated_at = ticket.updated_at or "sem data de atualização"
+        lines = [
+            f"Status atual do ticket {ticket.ticket_id}: {ticket.status}.",
+            f"Assunto: {ticket.subject}",
+            f"Prioridade: {ticket.priority}. Atualizado em: {updated_at}.",
+        ]
+        if ticket.assigned_glpi_user_id:
+            lines.append(f"Responsável GLPI: {ticket.assigned_glpi_user_id}.")
+        lines.append(
+            "Para alterar: /status "
+            f"{ticket.ticket_id} <new|processing|planned|waiting|solved|closed>."
+        )
+        return "\n".join(lines)
+
     def _to_ticket_resolution_entry_response(self, entry: object) -> TicketResolutionEntryResponse:
         return TicketResolutionEntryResponse(
             source=str(getattr(entry, "source", "unknown")),
@@ -2838,7 +2982,7 @@ class HelpdeskOrchestrator:
             "help": "/help",
             "me": "/me",
             "open": "/open <descrição>",
-            "status": "/status <id> <status>",
+            "status": "/status <id> [status]",
             "ticket": "/ticket <id>",
         }
         available_commands = sorted(ALLOWED_OPERATOR_COMMANDS.get(role, set()))
